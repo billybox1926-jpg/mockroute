@@ -18,12 +18,38 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, ClassVar
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
 DEFAULT_CONFIG = "routes.json"
 MAX_LATENCY_MS = 60000  # Cap latency to prevent thread exhaustion (60 seconds)
+
+# Swagger UI HTML (loads from CDN)
+SWAGGER_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>{title} - API Docs</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css">
+    <style>
+        body {{ margin: 0; padding: 0; }}
+        .topbar {{ display: none; }}
+    </style>
+</head>
+<body>
+    <div id="swagger-ui"></div>
+    <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+    <script>
+        window.ui = SwaggerUIBundle({{
+            url: "/openapi.json",
+            dom_id: "#swagger-ui",
+            presets: [SwaggerUIBundle.presets.apis, SwaggerUIBundle.SwaggerUIStandalonePreset],
+            layout: "BaseLayout"
+        }});
+    </script>
+</body>
+</html>"""
 
 CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
@@ -75,6 +101,82 @@ def route_to_pattern(route_path: str) -> re.Pattern:
     # Replace :param with named capture group matching anything except /
     pattern = re.sub(r":([a-zA-Z_][a-zA-Z0-9_]*)", r"(?P<\1>[^/]+)", pattern)
     return re.compile(f"^{pattern}$")
+
+
+def generate_openapi_spec(routes: list[dict], title: str = "Mock API", version: str = "0.3.0") -> dict:
+    """Generate OpenAPI 3.0 spec from route configuration.
+    
+    Args:
+        routes: List of route definitions
+        title: API title for the spec
+        version: API version for the spec
+    
+    Returns:
+        OpenAPI 3.0 specification as a dictionary
+    """
+    spec = {
+        "openapi": "3.0.0",
+        "info": {
+            "title": title,
+            "version": version,
+            "description": "Generated from mockroute configuration"
+        },
+        "paths": {}
+    }
+    
+    for route in routes:
+        path = route.get("path", "")
+        method = route.get("method", "GET").lower()
+        
+        # Convert :param to {param} for OpenAPI format
+        openapi_path = re.sub(r":([a-zA-Z_][a-zA-Z0-9_]*)", r"{\1}", path)
+        
+        if openapi_path not in spec["paths"]:
+            spec["paths"][openapi_path] = {}
+        
+        # Build parameter list for path params
+        params = []
+        for match in re.finditer(r":([a-zA-Z_][a-zA-Z0-9_]*)", path):
+            param_name = match.group(1)
+            params.append({
+                "name": param_name,
+                "in": "path",
+                "required": True,
+                "schema": {"type": "string"}
+            })
+        
+        # Build response object
+        status_code = str(route.get("status", 200))
+        response_obj = {
+            "description": f"Response for {method.upper()} {path}"
+        }
+        
+        # Try to extract example from body
+        body = route.get("body")
+        if body is not None:
+            content_type = "application/json"
+            if isinstance(body, str):
+                content_type = "text/plain"
+            
+            response_obj["content"] = {
+                content_type: {
+                    "example": body
+                }
+            }
+        
+        route_entry = {
+            "summary": f"{method.upper()} {path}",
+            "responses": {
+                status_code: response_obj
+            }
+        }
+        
+        if params:
+            route_entry["parameters"] = params
+        
+        spec["paths"][openapi_path][method] = route_entry
+    
+    return spec
 
 
 def load_config(path: str) -> dict:
@@ -156,6 +258,7 @@ class MockRouteHandler(BaseHTTPRequestHandler):
     global_latency: int | None = None
     global_failure_rate: float | None = None
     enable_cors: bool = True
+    enable_docs: bool = True
     enable_colors: bool = True
     verbose: bool = False
 
@@ -194,6 +297,38 @@ class MockRouteHandler(BaseHTTPRequestHandler):
         """Core request handling logic."""
         # Strip query string for route matching
         path = self.path.split("?")[0]
+        
+        # Handle Swagger UI requests
+        if self.enable_docs:
+            if path == "/docs" or path == "/docs/":
+                if method == "GET":
+                    html = SWAGGER_HTML.format(title="mockroute")
+                    encoded = html.encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Content-Length", str(len(encoded)))
+                    self.end_headers()
+                    self.wfile.write(encoded)
+                    return
+                elif method == "OPTIONS":
+                    self._send_response(204, None)
+                    return
+            
+            if path == "/openapi.json":
+                if method == "GET":
+                    routes = self._get_routes()
+                    spec = generate_openapi_spec(routes)
+                    encoded = json.dumps(spec, indent=2).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(encoded)))
+                    self.end_headers()
+                    self.wfile.write(encoded)
+                    return
+                elif method == "OPTIONS":
+                    self._send_response(204, None)
+                    return
+        
         routes = self._get_routes()
         defaults = self._get_defaults()
 
@@ -361,6 +496,9 @@ def main() -> None:
         "--no-color", action="store_true", help="disable colored output"
     )
     parser.add_argument(
+        "--no-docs", action="store_true", help="disable Swagger UI at /docs"
+    )
+    parser.add_argument(
         "--latency",
         type=int,
         default=None,
@@ -386,6 +524,7 @@ def main() -> None:
     MockRouteHandler.global_latency = args.latency
     MockRouteHandler.global_failure_rate = args.failure_rate
     MockRouteHandler.enable_cors = not args.no_cors
+    MockRouteHandler.enable_docs = not getattr(args, "no_docs", False)
     MockRouteHandler.verbose = args.verbose
 
     # Start server
@@ -394,6 +533,8 @@ def main() -> None:
         f"{Colors.BOLD}mockroute v{__version__}{Colors.RESET} serving on http://{args.host}:{args.port}"
     )
     print(f"Loaded {len(config.get('routes', []))} routes from {args.config}")
+    if MockRouteHandler.enable_docs:
+        print(f"API docs available at http://{args.host}:{args.port}/docs")
     print("Press Ctrl+C to stop")
     print()
 

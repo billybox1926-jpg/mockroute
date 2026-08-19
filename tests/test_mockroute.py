@@ -855,3 +855,194 @@ class TestRouteToPattern(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSwaggerUI(unittest.TestCase):
+    """Test Swagger UI server."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Start a test server with docs enabled."""
+        cls.config = {
+            "defaults": {
+                "status": 200,
+                "headers": {"Content-Type": "application/json"},
+                "latency_ms": 0,
+                "failure_rate": 0.0,
+            },
+            "routes": [
+                {
+                    "path": "/health",
+                    "method": "GET",
+                    "status": 200,
+                    "body": {"status": "ok"},
+                    "latency_ms": 0,
+                    "failure_rate": 0.0,
+                },
+                {
+                    "path": "/api/users/:id",
+                    "method": "GET",
+                    "status": 200,
+                    "body": {"id": 1},
+                    "latency_ms": 0,
+                    "failure_rate": 0.0,
+                },
+            ],
+        }
+        mockroute.MockRouteHandler.config = cls.config
+        mockroute.MockRouteHandler.global_latency = None
+        mockroute.MockRouteHandler.global_failure_rate = None
+        mockroute.MockRouteHandler.enable_cors = True
+        mockroute.MockRouteHandler.enable_docs = True
+        mockroute.MockRouteHandler.enable_colors = False
+
+        cls.server = mockroute.ThreadingHTTPServer(
+            ("127.0.0.1", 0), mockroute.MockRouteHandler
+        )
+        cls.port = cls.server.server_address[1]
+        cls.server_thread = threading.Thread(
+            target=cls.server.serve_forever, daemon=True
+        )
+        cls.server_thread.start()
+        time.sleep(0.1)
+
+    @classmethod
+    def tearDownClass(cls):
+        """Shut down the test server."""
+        cls.server.shutdown()
+        cls.server_thread.join(timeout=5)
+
+    def _request(self, method, path):
+        """Make an HTTP request and return response."""
+        conn = HTTPConnection("127.0.0.1", self.port, timeout=5)
+        conn.request(method, path)
+        resp = conn.getresponse()
+        body = resp.read()
+        conn.close()
+        return resp, body
+
+    def test_docs_endpoint_returns_html(self):
+        """GET /docs returns Swagger UI HTML."""
+        resp, body = self._request("GET", "/docs")
+        self.assertEqual(resp.status, 200)
+        self.assertIn("text/html", resp.getheader("Content-Type"))
+        self.assertIn(b"swagger-ui", body.lower())
+
+    def test_openapi_json_endpoint(self):
+        """GET /openapi.json returns OpenAPI spec."""
+        resp, body = self._request("GET", "/openapi.json")
+        self.assertEqual(resp.status, 200)
+        self.assertIn("application/json", resp.getheader("Content-Type"))
+        
+        spec = json.loads(body)
+        self.assertEqual(spec["openapi"], "3.0.0")
+        self.assertIn("/health", spec["paths"])
+        self.assertIn("/api/users/{id}", spec["paths"])
+
+    def test_openapi_spec_has_path_params(self):
+        """OpenAPI spec correctly represents path parameters."""
+        resp, body = self._request("GET", "/openapi.json")
+        spec = json.loads(body)
+        
+        users_path = spec["paths"]["/api/users/{id}"]
+        self.assertIn("parameters", users_path["get"])
+        self.assertEqual(users_path["get"]["parameters"][0]["name"], "id")
+        self.assertEqual(users_path["get"]["parameters"][0]["in"], "path")
+
+    def test_docs_disabled_when_flag_set(self):
+        """Docs are disabled when --no-docs is used."""
+        # Create a new server with docs disabled
+        mockroute.MockRouteHandler.enable_docs = False
+        
+        server = mockroute.ThreadingHTTPServer(
+            ("127.0.0.1", 0), mockroute.MockRouteHandler
+        )
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        
+        try:
+            conn = HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.request("GET", "/docs")
+            resp = conn.getresponse()
+            self.assertEqual(resp.status, 404)  # Falls through to normal 404
+            conn.close()
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+            mockroute.MockRouteHandler.enable_docs = True
+
+
+class TestGenerateOpenAPISpec(unittest.TestCase):
+    """Test generate_openapi_spec function."""
+
+    def test_basic_spec(self):
+        """Basic spec generation."""
+        routes = [
+            {"path": "/health", "method": "GET", "status": 200, "body": {"status": "ok"}},
+            {"path": "/api/users", "method": "POST", "status": 201, "body": {"created": True}},
+        ]
+        
+        spec = mockroute.generate_openapi_spec(routes)
+        
+        self.assertEqual(spec["openapi"], "3.0.0")
+        self.assertIn("/health", spec["paths"])
+        self.assertIn("/api/users", spec["paths"])
+        
+        health_get = spec["paths"]["/health"]["get"]
+        self.assertEqual(health_get["summary"], "GET /health")
+        self.assertIn("200", health_get["responses"])
+
+    def test_path_params_converted(self):
+        """Path params converted from :id to {id} format."""
+        routes = [
+            {"path": "/api/users/:id", "method": "GET", "status": 200, "body": {"id": 1}},
+        ]
+        
+        spec = mockroute.generate_openapi_spec(routes)
+        
+        # Should use OpenAPI format {id}, not :id
+        self.assertIn("/api/users/{id}", spec["paths"])
+        self.assertNotIn("/api/users/:id", spec["paths"])
+        
+        # Should have parameter definition
+        params = spec["paths"]["/api/users/{id}"]["get"]["parameters"]
+        self.assertEqual(len(params), 1)
+        self.assertEqual(params[0]["name"], "id")
+        self.assertEqual(params[0]["in"], "path")
+        self.assertTrue(params[0]["required"])
+
+    def test_multiple_methods_same_path(self):
+        """Multiple methods on same path."""
+        routes = [
+            {"path": "/api/users", "method": "GET", "status": 200, "body": []},
+            {"path": "/api/users", "method": "POST", "status": 201, "body": {"created": True}},
+        ]
+        
+        spec = mockroute.generate_openapi_spec(routes)
+        
+        self.assertIn("get", spec["paths"]["/api/users"])
+        self.assertIn("post", spec["paths"]["/api/users"])
+
+    def test_string_body_uses_text_plain(self):
+        """String response bodies use text/plain content type."""
+        routes = [
+            {"path": "/text", "method": "GET", "status": 200, "body": "Hello World"},
+        ]
+        
+        spec = mockroute.generate_openapi_spec(routes)
+        
+        response = spec["paths"]["/text"]["get"]["responses"]["200"]
+        self.assertIn("text/plain", response["content"])
+
+    def test_json_body_uses_application_json(self):
+        """JSON response bodies use application/json content type."""
+        routes = [
+            {"path": "/json", "method": "GET", "status": 200, "body": {"key": "value"}},
+        ]
+        
+        spec = mockroute.generate_openapi_spec(routes)
+        
+        response = spec["paths"]["/json"]["get"]["responses"]["200"]
+        self.assertIn("application/json", response["content"])
+        self.assertEqual(response["content"]["application/json"]["example"], {"key": "value"})

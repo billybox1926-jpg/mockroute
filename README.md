@@ -15,6 +15,7 @@ Point it at a JSON route file, and it serves fake responses with configurable la
 - **CORS support** — automatic preflight handling and permissive headers
 - **Threaded server** — handles concurrent requests
 - **Colored output** — method and status codes colorized for readability
+- **Swagger UI** — interactive API docs at /docs with OpenAPI spec generation
 
 ## Quick Start
 
@@ -67,8 +68,31 @@ python mockroute.py --config routes.json --port 8000 --failure-rate 0.1
 | `--verbose` | `false` | Extra debug logging |
 | `--no-cors` | `false` | Disable CORS headers |
 | `--no-color` | `false` | Disable colored output |
+| `--no-docs` | `false` | Disable Swagger UI at /docs |
 | `--latency` | `None` | Global latency override (ms) |
 | `--failure-rate` | `None` | Global failure rate override (0.0–1.0) |
+
+## API Documentation
+
+mockroute automatically generates an OpenAPI 3.0 specification from your routes and serves it via Swagger UI.
+
+```bash
+# Start the server (docs enabled by default)
+python mockroute.py --config routes.json --port 8000
+
+# View the docs
+open http://localhost:8000/docs
+```
+
+The Swagger UI provides:
+- Interactive API exploration
+- Try-it-out functionality for all endpoints
+- Path parameter documentation
+- Response examples from your route bodies
+
+The raw OpenAPI spec is available at `http://localhost:8000/openapi.json`.
+
+Disable docs with `--no-docs` if you don't need them.
 
 ## Route Configuration
 

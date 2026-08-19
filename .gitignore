@@ -1,4 +1,5 @@
-# Python
+```
+# Compiled Python files
 __pycache__/
 *.pyc
 *.pyo
@@ -7,8 +8,9 @@ __pycache__/
 # Logs and temp files
 *.log
 *.tmp
+*.swp
 
-# Environment
+# Environment files
 .env
 .env.local
 *.env.*
@@ -26,19 +28,17 @@ node_modules/
 dist/
 build/
 target/
-*.egg-info/
-.installed.cfg
-*.egg
 
-# Project specific
-routes.json
-*.context.md
-*.context.json
+# Coverage reports
+.coverage
+coverage/
+htmlcov/
 
-# OS
+# Testing
+.pytest_cache/
+.mypy_cache/
+
+# System files
 .DS_Store
 Thumbs.db
-
-# IDE
-*.swp
-*.swo
+```

@@ -73,5 +73,4 @@ jobs:
 
     - name: Verify wheel contents
       run: |
-        pip install zipfile
         python -c "import zipfile; z=zipfile.ZipFile('dist/mockroute-0.2.0-py3-none-any.whl'); print([f.filename for f in z.filelist])"

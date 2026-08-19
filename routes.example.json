@@ -32,6 +32,22 @@
       "failure_rate": 0.0
     },
     {
+      "path": "/api/users/:id",
+      "method": "GET",
+      "status": 200,
+      "body": {"id": 1, "name": "Alice"},
+      "latency_ms": 100,
+      "failure_rate": 0.0
+    },
+    {
+      "path": "/api/users/:id/posts/:postId",
+      "method": "GET",
+      "status": 200,
+      "body": {"postId": 42, "title": "Hello World"},
+      "latency_ms": 150,
+      "failure_rate": 0.0
+    },
+    {
       "path": "/api/error",
       "method": "GET",
       "status": 500,

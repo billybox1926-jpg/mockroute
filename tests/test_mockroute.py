@@ -25,6 +25,8 @@ class TestLoadConfig(unittest.TestCase):
             f.flush()
             config = mockroute.load_config(f.name)
             self.assertEqual(config["routes"][0]["path"], "/test")
+            # Check that _pattern was compiled
+            self.assertIn("_pattern", config["routes"][0])
 
     def test_load_missing_file(self):
         """Missing config file should exit with error."""
@@ -45,51 +47,81 @@ class TestLoadConfig(unittest.TestCase):
 class TestFindRoute(unittest.TestCase):
     """Tests for find_route() function."""
 
+    def _make_routes(self, *route_defs):
+        """Helper to create routes with compiled patterns."""
+        return [
+            {
+                **rd,
+                "_pattern": mockroute.route_to_pattern(rd["path"]),
+                "_path": rd["path"],
+                "_has_params": ":" in rd["path"],
+            }
+            for rd in route_defs
+        ]
+
     def test_exact_match(self):
         """Find route with exact path and method match."""
-        routes = [
+        routes = self._make_routes(
             {"path": "/health", "method": "GET"},
             {"path": "/api/users", "method": "GET"},
             {"path": "/api/users", "method": "POST"},
-        ]
-        result = mockroute.find_route(routes, "GET", "/health")
-        self.assertEqual(result["path"], "/health")
-        self.assertEqual(result["method"], "GET")
+        )
+        route, params = mockroute.find_route(routes, "GET", "/health")
+        self.assertIsNotNone(route)
+        self.assertEqual(route["path"], "/health")
+        self.assertEqual(route["method"], "GET")
+        self.assertEqual(params, {})
 
     def test_query_string_stripped(self):
-        """Query string is stripped before matching."""
-        routes = [{"path": "/api/users", "method": "GET"}]
-        result = mockroute.find_route(routes, "GET", "/api/users?limit=10")
-        self.assertEqual(result["path"], "/api/users")
+        """Query string is stripped before matching (in _handle_request).
+
+        find_route itself does exact matching - query string stripping
+        is the caller's responsibility.
+        """
+        routes = self._make_routes({"path": "/api/users", "method": "GET"})
+        # Without stripping, exact match fails
+        route, _params = mockroute.find_route(routes, "GET", "/api/users?limit=10")
+        self.assertIsNone(route)
+        # With stripping (as done in _handle_request), it matches
+        clean_path = "/api/users?limit=10".split("?")[0]
+        route, _params = mockroute.find_route(routes, "GET", clean_path)
+        self.assertIsNotNone(route)
 
     def test_method_mismatch(self):
         """No match when method differs."""
-        routes = [{"path": "/api/users", "method": "GET"}]
-        result = mockroute.find_route(routes, "POST", "/api/users")
-        self.assertIsNone(result)
+        routes = self._make_routes({"path": "/api/users", "method": "GET"})
+        route, params = mockroute.find_route(routes, "POST", "/api/users")
+        self.assertIsNone(route)
+        self.assertEqual(params, {})
 
     def test_path_mismatch(self):
         """No match when path differs."""
-        routes = [{"path": "/health", "method": "GET"}]
-        result = mockroute.find_route(routes, "GET", "/unknown")
-        self.assertIsNone(result)
+        routes = self._make_routes({"path": "/health", "method": "GET"})
+        route, params = mockroute.find_route(routes, "GET", "/unknown")
+        self.assertIsNone(route)
+        self.assertEqual(params, {})
 
     def test_empty_routes(self):
         """No match in empty routes list."""
-        result = mockroute.find_route([], "GET", "/test")
-        self.assertIsNone(result)
+        route, params = mockroute.find_route([], "GET", "/test")
+        self.assertIsNone(route)
+        self.assertEqual(params, {})
 
-    def test_query_string_stripped_before_find_route(self):
-        """Query strings are stripped before find_route is called (integration test)."""
-        routes = [{"path": "/api/users", "method": "GET"}]
-        result = mockroute.find_route(routes, "GET", "/api/users")
-        self.assertEqual(result["path"], "/api/users")
+    def test_path_param_extracted(self):
+        """Path parameter is extracted correctly."""
+        routes = self._make_routes({"path": "/api/users/:id", "method": "GET"})
+        route, params = mockroute.find_route(routes, "GET", "/api/users/123")
+        self.assertIsNotNone(route)
+        self.assertEqual(params, {"id": "123"})
 
-    def test_no_match_with_query_string_in_path(self):
-        """Paths with query strings match (query string stripped internally)."""
-        routes = [{"path": "/api/users", "method": "GET"}]
-        result = mockroute.find_route(routes, "GET", "/api/users?limit=10")
-        self.assertEqual(result["path"], "/api/users")
+    def test_multiple_path_params(self):
+        """Multiple path parameters are extracted correctly."""
+        routes = self._make_routes(
+            {"path": "/api/users/:id/posts/:postId", "method": "GET"}
+        )
+        route, params = mockroute.find_route(routes, "GET", "/api/users/42/posts/7")
+        self.assertIsNotNone(route)
+        self.assertEqual(params, {"id": "42", "postId": "7"})
 
 
 class TestApplyDefaults(unittest.TestCase):
@@ -219,44 +251,12 @@ class TestMockRouteHandler(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         """Start a test server in a background thread."""
-        cls.config = {
-            "defaults": {
-                "status": 200,
-                "headers": {"Content-Type": "application/json"},
-                "latency_ms": 0,
-                "failure_rate": 0.0,
-            },
-            "routes": [
-                {
-                    "path": "/health",
-                    "method": "GET",
-                    "status": 200,
-                    "body": {"status": "ok"},
-                    "latency_ms": 0,
-                    "failure_rate": 0.0,
-                },
-                {
-                    "path": "/api/users",
-                    "method": "GET",
-                    "status": 200,
-                    "body": [{"id": 1, "name": "Alice"}],
-                    "latency_ms": 0,
-                    "failure_rate": 0.0,
-                },
-                {
-                    "path": "/api/users",
-                    "method": "POST",
-                    "status": 201,
-                    "body": {"created": True},
-                    "latency_ms": 0,
-                    "failure_rate": 0.0,
-                },
-            ],
-        }
+        cls.config = mockroute.load_config("routes.example.json")
         mockroute.MockRouteHandler.config = cls.config
         mockroute.MockRouteHandler.global_latency = None
         mockroute.MockRouteHandler.global_failure_rate = None
         mockroute.MockRouteHandler.enable_cors = True
+        mockroute.MockRouteHandler.enable_colors = False
         mockroute.MockRouteHandler.verbose = False
 
         cls.server = mockroute.ThreadingHTTPServer(
@@ -276,6 +276,7 @@ class TestMockRouteHandler(unittest.TestCase):
         cls.server_thread.join(timeout=5)
         # Reset class attributes for test isolation
         mockroute.MockRouteHandler.enable_cors = True
+        mockroute.MockRouteHandler.enable_colors = True
         mockroute.MockRouteHandler.global_latency = None
         mockroute.MockRouteHandler.global_failure_rate = None
         mockroute.MockRouteHandler.verbose = False
@@ -299,7 +300,9 @@ class TestMockRouteHandler(unittest.TestCase):
         """GET /api/users returns user list."""
         resp, body = self._request("GET", "/api/users")
         self.assertEqual(resp.status, 200)
-        self.assertEqual(json.loads(body), [{"id": 1, "name": "Alice"}])
+        self.assertEqual(
+            json.loads(body), [{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]
+        )
 
     def test_post_users(self):
         """POST /api/users returns 201."""
@@ -344,20 +347,29 @@ class TestMockRouteHandler(unittest.TestCase):
         """Requests with query strings match routes correctly."""
         resp, body = self._request("GET", "/api/users?limit=10")
         self.assertEqual(resp.status, 200)
-        self.assertEqual(json.loads(body), [{"id": 1, "name": "Alice"}])
+        self.assertEqual(
+            json.loads(body), [{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]
+        )
 
     def test_query_string_multiple_params(self):
         """Multiple query parameters are handled correctly."""
         resp, body = self._request("GET", "/api/users?page=1&size=5&sort=name")
         self.assertEqual(resp.status, 200)
-        self.assertEqual(json.loads(body), [{"id": 1, "name": "Alice"}])
+        self.assertEqual(
+            json.loads(body), [{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]
+        )
 
-    def test_defaults_application(self):
-        """Default headers and route headers are merged in actual response."""
-        resp, body = self._request("GET", "/health")
-        self.assertIn("application/json", resp.getheader("Content-Type"))
-        self.assertEqual(resp.getheader("Access-Control-Allow-Origin"), "*")
-        self.assertEqual(json.loads(body), {"status": "ok"})
+    def test_path_parameter_matching(self):
+        """Path parameters are matched and extracted."""
+        resp, body = self._request("GET", "/api/users/123")
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(json.loads(body), {"id": 1, "name": "Alice"})
+
+    def test_multiple_path_parameters(self):
+        """Multiple path parameters are matched."""
+        resp, body = self._request("GET", "/api/users/42/posts/7")
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(json.loads(body), {"postId": 42, "title": "Hello World"})
 
 
 class TestFailureInjection(unittest.TestCase):
@@ -379,6 +391,7 @@ class TestFailureInjection(unittest.TestCase):
         }
         mockroute.MockRouteHandler.config = config
         mockroute.MockRouteHandler.global_failure_rate = None
+        mockroute.MockRouteHandler.enable_colors = False
 
         server = mockroute.ThreadingHTTPServer(
             ("127.0.0.1", 0), mockroute.MockRouteHandler
@@ -414,6 +427,7 @@ class TestFailureInjection(unittest.TestCase):
         }
         mockroute.MockRouteHandler.config = config
         mockroute.MockRouteHandler.global_failure_rate = None
+        mockroute.MockRouteHandler.enable_colors = False
 
         server = mockroute.ThreadingHTTPServer(
             ("127.0.0.1", 0), mockroute.MockRouteHandler
@@ -454,6 +468,7 @@ class TestGlobalOverrides(unittest.TestCase):
         mockroute.MockRouteHandler.config = config
         mockroute.MockRouteHandler.global_latency = 50
         mockroute.MockRouteHandler.global_failure_rate = None
+        mockroute.MockRouteHandler.enable_colors = False
 
         server = mockroute.ThreadingHTTPServer(
             ("127.0.0.1", 0), mockroute.MockRouteHandler
@@ -491,6 +506,7 @@ class TestGlobalOverrides(unittest.TestCase):
         }
         mockroute.MockRouteHandler.config = config
         mockroute.MockRouteHandler.global_failure_rate = 1.0
+        mockroute.MockRouteHandler.enable_colors = False
 
         server = mockroute.ThreadingHTTPServer(
             ("127.0.0.1", 0), mockroute.MockRouteHandler
@@ -532,6 +548,7 @@ class TestNoCors(unittest.TestCase):
         mockroute.MockRouteHandler.enable_cors = False
         mockroute.MockRouteHandler.global_latency = None
         mockroute.MockRouteHandler.global_failure_rate = None
+        mockroute.MockRouteHandler.enable_colors = False
 
         server = mockroute.ThreadingHTTPServer(
             ("127.0.0.1", 0), mockroute.MockRouteHandler
@@ -572,6 +589,7 @@ class TestDefaultsApplication(unittest.TestCase):
             ],
         }
         mockroute.MockRouteHandler.config = config
+        mockroute.MockRouteHandler.enable_colors = False
 
         server = mockroute.ThreadingHTTPServer(
             ("127.0.0.1", 0), mockroute.MockRouteHandler
@@ -612,6 +630,7 @@ class TestHeadMethod(unittest.TestCase):
         mockroute.MockRouteHandler.enable_cors = True
         mockroute.MockRouteHandler.global_latency = None
         mockroute.MockRouteHandler.global_failure_rate = None
+        mockroute.MockRouteHandler.enable_colors = False
 
         server = mockroute.ThreadingHTTPServer(
             ("127.0.0.1", 0), mockroute.MockRouteHandler
@@ -653,6 +672,7 @@ class TestQueryStringMatching(unittest.TestCase):
         mockroute.MockRouteHandler.config = config
         mockroute.MockRouteHandler.global_latency = None
         mockroute.MockRouteHandler.global_failure_rate = None
+        mockroute.MockRouteHandler.enable_colors = False
 
         server = mockroute.ThreadingHTTPServer(
             ("127.0.0.1", 0), mockroute.MockRouteHandler
@@ -682,11 +702,106 @@ class TestLatencyCap(unittest.TestCase):
         self.assertGreater(mockroute.MAX_LATENCY_MS, 0)
         self.assertEqual(mockroute.MAX_LATENCY_MS, 60000)
 
-    def test_latency_cap_applied_to_route(self):
-        """Route latency exceeding cap is reduced to MAX_LATENCY_MS."""
-        # Just verify the cap exists and is reasonable
-        self.assertEqual(mockroute.MAX_LATENCY_MS, 60000)
-        # The actual cap behavior is tested in the unit tests for _handle_request
+
+class TestPathParameters(unittest.TestCase):
+    """Test path parameter extraction."""
+
+    def test_single_path_param(self):
+        """Single path parameter is extracted correctly."""
+        routes = [
+            {
+                "path": "/api/users/:id",
+                "method": "GET",
+                "_pattern": mockroute.route_to_pattern("/api/users/:id"),
+                "_path": "/api/users/:id",
+                "_has_params": True,
+            }
+        ]
+        route, params = mockroute.find_route(routes, "GET", "/api/users/123")
+        self.assertIsNotNone(route)
+        self.assertEqual(params, {"id": "123"})
+
+    def test_multiple_path_params(self):
+        """Multiple path parameters are extracted correctly."""
+        routes = [
+            {
+                "path": "/api/users/:id/posts/:postId",
+                "method": "GET",
+                "_pattern": mockroute.route_to_pattern("/api/users/:id/posts/:postId"),
+                "_path": "/api/users/:id/posts/:postId",
+                "_has_params": True,
+            }
+        ]
+        route, params = mockroute.find_route(routes, "GET", "/api/users/42/posts/7")
+        self.assertIsNotNone(route)
+        self.assertEqual(params, {"id": "42", "postId": "7"})
+
+    def test_no_params_for_static_route(self):
+        """Static routes return empty params."""
+        routes = [
+            {
+                "path": "/health",
+                "method": "GET",
+                "_pattern": mockroute.route_to_pattern("/health"),
+                "_path": "/health",
+                "_has_params": False,
+            }
+        ]
+        route, params = mockroute.find_route(routes, "GET", "/health")
+        self.assertIsNotNone(route)
+        self.assertEqual(params, {})
+
+    def test_path_param_no_match(self):
+        """Non-matching path returns None."""
+        routes = [
+            {
+                "path": "/api/users/:id",
+                "method": "GET",
+                "_pattern": mockroute.route_to_pattern("/api/users/:id"),
+                "_path": "/api/users/:id",
+                "_has_params": True,
+            }
+        ]
+        route, params = mockroute.find_route(routes, "GET", "/api/posts/123")
+        self.assertIsNone(route)
+        self.assertEqual(params, {})
+
+
+class TestRouteToPattern(unittest.TestCase):
+    """Test route_to_pattern function."""
+
+    def test_static_path(self):
+        """Static path matches exactly."""
+        pattern = mockroute.route_to_pattern("/health")
+        self.assertIsNotNone(pattern.match("/health"))
+        self.assertIsNone(pattern.match("/health/extra"))
+
+    def test_single_param(self):
+        """Single param path matches."""
+        pattern = mockroute.route_to_pattern("/api/users/:id")
+        self.assertIsNotNone(pattern.match("/api/users/123"))
+        self.assertIsNotNone(pattern.match("/api/users/abc"))
+        self.assertIsNone(pattern.match("/api/users"))
+        self.assertIsNone(pattern.match("/api/users/123/posts"))
+
+    def test_multiple_params(self):
+        """Multiple param path matches."""
+        pattern = mockroute.route_to_pattern("/api/users/:id/posts/:postId")
+        self.assertIsNotNone(pattern.match("/api/users/1/posts/2"))
+        self.assertIsNone(pattern.match("/api/users/1/posts"))
+
+    def test_underscore_in_param(self):
+        """Underscores in param names work."""
+        pattern = mockroute.route_to_pattern("/api/:user_id")
+        self.assertIsNotNone(pattern.match("/api/123"))
+        self.assertEqual(pattern.match("/api/123").groupdict(), {"user_id": "123"})
+
+    def test_numeric_start_param_fails(self):
+        """Params starting with numbers should not match."""
+        # This is intentional - params must start with letter or underscore
+        pattern = mockroute.route_to_pattern("/api/:123")
+        # :123 should not be treated as a param, so it won't match /api/456
+        self.assertIsNone(pattern.match("/api/456"))
 
 
 if __name__ == "__main__":

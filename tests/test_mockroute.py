@@ -75,6 +75,22 @@ class TestFindRoute(unittest.TestCase):
         result = mockroute.find_route([], "GET", "/test")
         self.assertIsNone(result)
 
+    def test_query_string_stripped_before_find_route(self):
+        """Query strings are stripped before find_route is called (integration test)."""
+        # Note: find_route expects paths without query strings
+        # The stripping happens in _handle_request before calling find_route
+        # This test verifies that a path without query string matches correctly
+        routes = [{"path": "/api/users", "method": "GET"}]
+        result = mockroute.find_route(routes, "GET", "/api/users")
+        self.assertEqual(result["path"], "/api/users")
+        
+    def test_no_match_with_query_string_in_path(self):
+        """Paths with query strings don't match (stripping happens earlier)."""
+        # find_route does exact matching; query string stripping is done by caller
+        routes = [{"path": "/api/users", "method": "GET"}]
+        result = mockroute.find_route(routes, "GET", "/api/users?limit=10")
+        self.assertIsNone(result)
+
 
 class TestApplyDefaults(unittest.TestCase):
     """Tests for apply_defaults() function."""
@@ -100,6 +116,39 @@ class TestApplyDefaults(unittest.TestCase):
         route = {"path": "/test", "method": "GET", "status": 200}
         result = mockroute.apply_defaults(route, {})
         self.assertEqual(result["status"], 200)
+
+    def test_headers_merged_not_replaced(self):
+        """Headers from defaults and route are merged, not replaced."""
+        defaults = {"headers": {"Content-Type": "application/json", "X-Default": "default-value"}}
+        route = {"path": "/test", "method": "GET", "headers": {"X-Custom": "custom-value"}}
+        result = mockroute.apply_defaults(route, defaults)
+        # Both default and custom headers should be present
+        self.assertEqual(result["headers"]["Content-Type"], "application/json")
+        self.assertEqual(result["headers"]["X-Default"], "default-value")
+        self.assertEqual(result["headers"]["X-Custom"], "custom-value")
+        
+    def test_route_headers_override_default_headers(self):
+        """Route headers override default headers with same key."""
+        defaults = {"headers": {"Content-Type": "application/json", "X-Shared": "default"}}
+        route = {"path": "/test", "method": "GET", "headers": {"X-Shared": "override"}}
+        result = mockroute.apply_defaults(route, defaults)
+        # Route value should override default
+        self.assertEqual(result["headers"]["X-Shared"], "override")
+        self.assertEqual(result["headers"]["Content-Type"], "application/json")
+        
+    def test_headers_only_in_route(self):
+        """Headers only in route are preserved."""
+        defaults = {"status": 200}
+        route = {"path": "/test", "method": "GET", "headers": {"X-Custom": "value"}}
+        result = mockroute.apply_defaults(route, defaults)
+        self.assertEqual(result["headers"]["X-Custom"], "value")
+        
+    def test_headers_only_in_defaults(self):
+        """Headers only in defaults are preserved."""
+        defaults = {"headers": {"Content-Type": "text/plain"}}
+        route = {"path": "/test", "method": "GET"}
+        result = mockroute.apply_defaults(route, defaults)
+        self.assertEqual(result["headers"]["Content-Type"], "text/plain")
 
 
 class TestFormatBody(unittest.TestCase):
@@ -269,6 +318,27 @@ class TestMockRouteHandler(unittest.TestCase):
         # /health has Content-Type header in config
         resp, body = self._request("GET", "/health")
         self.assertIn("application/json", resp.getheader("Content-Type"))
+
+    def test_query_string_in_request(self):
+        """Requests with query strings match routes correctly."""
+        # Query string should be stripped, so /api/users?limit=10 matches /api/users
+        resp, body = self._request("GET", "/api/users?limit=10")
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(json.loads(body), [{"id": 1, "name": "Alice"}])
+        
+    def test_query_string_multiple_params(self):
+        """Multiple query parameters are handled correctly."""
+        resp, body = self._request("GET", "/api/users?page=1&size=5&sort=name")
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(json.loads(body), [{"id": 1, "name": "Alice"}])
+        
+    def test_header_merge_integration(self):
+        """Default headers and route headers are merged in actual response."""
+        # The test config has defaults with Content-Type header
+        # Verify it's present in the response
+        resp, body = self._request("GET", "/health")
+        self.assertIn("application/json", resp.getheader("Content-Type"))
+        self.assertEqual(resp.getheader("Access-Control-Allow-Origin"), "*")
 
 
 class TestFailureInjection(unittest.TestCase):

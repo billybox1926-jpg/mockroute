@@ -22,6 +22,7 @@ __version__ = "0.1.0"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
 DEFAULT_CONFIG = "routes.json"
+MAX_LATENCY_MS = 10000  # Cap latency to prevent thread exhaustion
 
 CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
@@ -146,6 +147,9 @@ class MockRouteHandler(BaseHTTPRequestHandler):
             latency_ms = self.global_latency
         else:
             latency_ms = route.get("latency_ms", 0) or 0
+
+        # Cap latency to prevent thread exhaustion
+        latency_ms = min(latency_ms, MAX_LATENCY_MS)
 
         # Determine failure rate
         if self.global_failure_rate is not None:

@@ -22,15 +22,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, ClassVar
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
 DEFAULT_CONFIG = "routes.json"
-MAX_LATENCY_MS = 60000  # Cap latency to prevent thread exhaustion (60 seconds)
-DEFAULT_RATE_LIMIT = 100  # Requests per minute per IP
+MAX_LATENCY_MS = 60000
+DEFAULT_RATE_LIMIT = 100
 
-# Swagger UI HTML (loads from CDN)
 SWAGGER_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -61,8 +60,6 @@ SWAGGER_HTML = """<!DOCTYPE html>
 
 
 class Colors:
-    """ANSI color codes for terminal output."""
-
     GREEN = "\033[92m"
     YELLOW = "\033[93m"
     RED = "\033[91m"
@@ -75,12 +72,10 @@ class Colors:
 
     @classmethod
     def disable(cls) -> None:
-        """Disable all colors (for --no-color flag)."""
         cls.GREEN = cls.YELLOW = cls.RED = cls.BLUE = ""
         cls.CYAN = cls.MAGENTA = cls.GRAY = cls.RESET = cls.BOLD = ""
 
 
-# Method-to-color mapping
 METHOD_COLORS = {
     "GET": Colors.GREEN,
     "POST": Colors.BLUE,
@@ -93,8 +88,6 @@ METHOD_COLORS = {
 
 
 class RateLimiter:
-    """Simple in-memory rate limiter using token bucket algorithm."""
-
     def __init__(self, max_requests: int = 100, window_seconds: int = 60):
         self.max_requests = max_requests
         self.window_seconds = window_seconds
@@ -102,33 +95,25 @@ class RateLimiter:
         self._lock = threading.Lock()
 
     def is_allowed(self, client_ip: str) -> bool:
-        """Check if request from client_ip is allowed."""
         now = time.monotonic()
         with self._lock:
-            # Clean old entries
             self._requests[client_ip] = [
                 t for t in self._requests[client_ip] if now - t < self.window_seconds
             ]
-            # Check limit
             if len(self._requests[client_ip]) >= self.max_requests:
                 return False
-            # Record request
             self._requests[client_ip].append(now)
             return True
 
 
 def validate_route(route: dict, index: int) -> list[str]:
-    """Validate a route definition. Returns list of error messages."""
     errors = []
-
-    # Check required fields
     if "path" not in route:
         errors.append(f"Route {index}: missing required field 'path'")
     elif not isinstance(route["path"], str):
         errors.append(f"Route {index}: 'path' must be a string")
     elif not route["path"].startswith("/"):
         errors.append(f"Route {index}: 'path' must start with /")
-
     if "method" not in route:
         errors.append(f"Route {index}: missing required field 'method'")
     elif not isinstance(route["method"], str):
@@ -143,36 +128,32 @@ def validate_route(route: dict, index: int) -> list[str]:
         "OPTIONS",
     ):
         errors.append(f"Route {index}: 'method' must be a valid HTTP method")
-
-    # Validate types if present
     if "status" in route:
         if not isinstance(route["status"], int):
             errors.append(f"Route {index}: 'status' must be an integer")
         elif not (100 <= route["status"] <= 599):
             errors.append(f"Route {index}: 'status' must be between 100 and 599")
-
     if "latency_ms" in route:
         if not isinstance(route["latency_ms"], (int, float)):
             errors.append(f"Route {index}: 'latency_ms' must be a number")
         elif route["latency_ms"] < 0:
             errors.append(f"Route {index}: 'latency_ms' must be >= 0")
-
     if "failure_rate" in route:
         if not isinstance(route["failure_rate"], (int, float)):
             errors.append(f"Route {index}: 'failure_rate' must be a number")
         elif not (0.0 <= route["failure_rate"] <= 1.0):
             errors.append(f"Route {index}: 'failure_rate' must be between 0.0 and 1.0")
-
     if "headers" in route and not isinstance(route["headers"], dict):
         errors.append(f"Route {index}: 'headers' must be an object")
-
+    if "match_query" in route and not isinstance(route["match_query"], dict):
+        errors.append(f"Route {index}: 'match_query' must be an object")
+    if "match_body" in route and not isinstance(route["match_body"], dict):
+        errors.append(f"Route {index}: 'match_body' must be an object")
     return errors
 
 
 def validate_config(config: dict) -> list[str]:
-    """Validate entire config. Returns list of error messages."""
     errors = []
-
     if "routes" not in config:
         errors.append("config: missing required field 'routes'")
     elif not isinstance(config["routes"], list):
@@ -183,17 +164,13 @@ def validate_config(config: dict) -> list[str]:
                 errors.append(f"config: route[{i}] must be an object")
             else:
                 errors.extend(validate_route(route, i))
-
-    # Validate defaults if present
     if "defaults" in config:
         if not isinstance(config["defaults"], dict):
             errors.append("config: 'defaults' must be an object")
-
     return errors
 
 
 def route_to_pattern(route_path: str) -> re.Pattern:
-    """Convert /users/:id to regex that captures :id as named group."""
     pattern = re.escape(route_path)
     pattern = pattern.replace(r"\:", ":")
     pattern = re.sub(r":([a-zA-Z_][a-zA-Z0-9_]*)", r"(?P<\1>[^/]+)", pattern)
@@ -201,9 +178,8 @@ def route_to_pattern(route_path: str) -> re.Pattern:
 
 
 def generate_openapi_spec(
-    routes: list[dict], title: str = "Mock API", version: str = "0.6.0"
+    routes: list[dict], title: str = "Mock API", version: str = "0.7.0"
 ) -> dict:
-    """Generate OpenAPI 3.0 spec from route configuration."""
     spec = {
         "openapi": "3.0.0",
         "info": {
@@ -213,75 +189,189 @@ def generate_openapi_spec(
         },
         "paths": {},
     }
-
     for route in routes:
         path = route.get("path", "")
         method = route.get("method", "GET").lower()
-
         openapi_path = re.sub(r":([a-zA-Z_][a-zA-Z0-9_]*)", r"{\1}", path)
-
         if openapi_path not in spec["paths"]:
             spec["paths"][openapi_path] = {}
-
         params = []
         for match in re.finditer(r":([a-zA-Z_][a-zA-Z0-9_]*)", path):
-            param_name = match.group(1)
             params.append(
                 {
-                    "name": param_name,
+                    "name": match.group(1),
                     "in": "path",
                     "required": True,
                     "schema": {"type": "string"},
                 }
             )
-
         status_code = str(route.get("status", 200))
         response_obj = {"description": f"Response for {method.upper()} {path}"}
-
         body = route.get("body")
         if body is not None:
-            content_type = "application/json"
-            if isinstance(body, str):
-                content_type = "text/plain"
-            response_obj["content"] = {content_type: {"example": body}}
-
+            ct = "text/plain" if isinstance(body, str) else "application/json"
+            response_obj["content"] = {ct: {"example": body}}
         route_entry = {
             "summary": f"{method.upper()} {path}",
             "responses": {status_code: response_obj},
         }
-
         if params:
             route_entry["parameters"] = params
-
         spec["paths"][openapi_path][method] = route_entry
-
     return spec
 
 
+def _yaml_value(s: str) -> Any:
+    s = s.strip()
+    if s.startswith('"') and s.endswith('"'):
+        return s[1:-1]
+    if s.startswith("'") and s.endswith("'"):
+        return s[1:-1]
+    if s.lower() == "true":
+        return True
+    if s.lower() == "false":
+        return False
+    if s.lower() == "null" or s == "~" or s == "":
+        return None
+    try:
+        return int(s)
+    except ValueError:
+        pass
+    try:
+        return float(s)
+    except ValueError:
+        pass
+    return s
+
+
+def _parse_yaml_simple(text: str) -> dict:
+    """Simple YAML parser for flat/nested structures."""
+    lines = text.split("\n")
+    root: dict = {}
+    stack: list[tuple[int, Any, str | None]] = [(-1, root, None)]
+
+    i = 0
+    while i < len(lines):
+        line = lines[i].rstrip()
+        i += 1
+
+        if not line or line.strip().startswith("#"):
+            continue
+
+        stripped = line.lstrip()
+        indent = len(line) - len(stripped)
+
+        while len(stack) > 1 and stack[-1][0] > indent:
+            stack.pop()
+
+        _, parent, _ = stack[-1]
+
+        if stripped.startswith("- "):
+            content = stripped[2:].strip()
+
+            if ":" in content:
+                key, _, value = content.partition(":")
+                key = key.strip().strip('"').strip("'")
+                value = value.strip()
+
+                new_dict: dict = {}
+
+                if i < len(lines):
+                    next_line = lines[i].rstrip()
+                    next_stripped = next_line.lstrip()
+                    next_indent = len(next_line) - len(next_stripped)
+
+                    if next_indent > indent and not next_stripped.startswith("- "):
+                        if isinstance(parent, list):
+                            parent.append(new_dict)
+                        stack.append((next_indent, new_dict, None))
+                        new_dict[key] = _yaml_value(value)
+                        continue
+                    else:
+                        if value:
+                            new_dict[key] = _yaml_value(value)
+                        if isinstance(parent, list):
+                            parent.append(new_dict)
+                else:
+                    if value:
+                        new_dict[key] = _yaml_value(value)
+                    if isinstance(parent, list):
+                        parent.append(new_dict)
+            else:
+                value = _yaml_value(content)
+                if isinstance(parent, list):
+                    parent.append(value)
+        else:
+            key, _, value = stripped.partition(":")
+            key = key.strip().strip('"').strip("'")
+            value = value.strip()
+
+            if value == "":
+                if i < len(lines):
+                    next_line = lines[i].rstrip()
+                    next_stripped = next_line.lstrip()
+                    next_indent = len(next_line) - len(next_stripped)
+
+                    if next_stripped.startswith("- "):
+                        new_list: list = []
+                        if isinstance(parent, dict):
+                            parent[key] = new_list
+                        stack.append((next_indent, new_list, None))
+                    elif next_indent > indent:
+                        new_dict = {}
+                        if isinstance(parent, dict):
+                            parent[key] = new_dict
+                        stack.append((next_indent, new_dict, None))
+                    else:
+                        if isinstance(parent, dict):
+                            parent[key] = None
+                else:
+                    if isinstance(parent, dict):
+                        parent[key] = None
+            else:
+                if isinstance(parent, dict):
+                    parent[key] = _yaml_value(value)
+
+    return root
+
+
 def load_config(path: str) -> dict:
-    """Load route configuration from a JSON file with validation."""
+    """Load route configuration from a JSON or YAML file with validation."""
     config_path = Path(path)
     if not config_path.exists():
         print(f"Error: config file not found: {path}", file=sys.stderr)
         sys.exit(1)
+
     try:
         with config_path.open("r", encoding="utf-8") as f:
-            config = json.load(f)
-    except json.JSONDecodeError as e:
-        print(f"Error: invalid JSON in {path}: {e}", file=sys.stderr)
+            text = f.read()
+    except OSError as e:
+        print(f"Error: cannot read {path}: {e}", file=sys.stderr)
         sys.exit(1)
+
+    if config_path.suffix.lower() in (".yaml", ".yml"):
+        try:
+            config = _parse_yaml_simple(text)
+        except (ValueError, TypeError, AttributeError) as e:
+            print(f"Error: invalid YAML in {path}: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        try:
+            config = json.loads(text)
+        except json.JSONDecodeError as e:
+            print(f"Error: invalid JSON in {path}: {e}", file=sys.stderr)
+            sys.exit(1)
+
     if not isinstance(config, dict):
         print("Error: config must be a JSON object", file=sys.stderr)
         sys.exit(1)
 
-    # Validate config
     errors = validate_config(config)
     if errors:
         for error in errors:
             print(f"Error: {error}", file=sys.stderr)
         sys.exit(1)
 
-    # Pre-compile regex patterns for path parameter matching
     defaults = config.get("defaults", {})
     for route in config.get("routes", []):
         route_defaults = dict(defaults)
@@ -299,40 +389,31 @@ def import_openapi_spec(path: str) -> dict:
     if not spec_path.exists():
         print(f"Error: OpenAPI spec file not found: {path}", file=sys.stderr)
         sys.exit(1)
-
     try:
         with spec_path.open("r", encoding="utf-8") as f:
             spec = json.load(f)
     except json.JSONDecodeError as e:
         print(f"Error: invalid JSON in {path}: {e}", file=sys.stderr)
         sys.exit(1)
-
     if not isinstance(spec, dict):
         print("Error: OpenAPI spec must be a JSON object", file=sys.stderr)
         sys.exit(1)
-
     if spec.get("openapi") != "3.0.0":
         print("Warning: Only OpenAPI 3.0.0 is fully supported", file=sys.stderr)
 
     routes = []
-    paths = spec.get("paths", {})
-
-    for path_template, path_item in paths.items():
+    for path_template, path_item in spec.get("paths", {}).items():
         if not isinstance(path_item, dict):
             continue
-
         mockroute_path = re.sub(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}", r":\1", path_template)
-
         for method in ["get", "post", "put", "delete", "patch", "head", "options"]:
             operation = path_item.get(method)
             if not isinstance(operation, dict):
                 continue
-
             responses = operation.get("responses", {})
             status_code = "200"
             response_body = None
             content_type = "application/json"
-
             for code in sorted(responses.keys()):
                 if code.startswith("2"):
                     status_code = code
@@ -340,25 +421,21 @@ def import_openapi_spec(path: str) -> dict:
                     if isinstance(response, dict):
                         content = response.get("content", {})
                         if "application/json" in content:
-                            json_content = content["application/json"]
-                            if "example" in json_content:
-                                response_body = json_content["example"]
-                            elif "examples" in json_content:
-                                examples = json_content["examples"]
+                            jc = content["application/json"]
+                            if "example" in jc:
+                                response_body = jc["example"]
+                            elif "examples" in jc:
+                                examples = jc["examples"]
                                 if examples:
-                                    first_example = next(iter(examples.values()))
-                                    if (
-                                        isinstance(first_example, dict)
-                                        and "value" in first_example
-                                    ):
-                                        response_body = first_example["value"]
+                                    first = next(iter(examples.values()))
+                                    if isinstance(first, dict) and "value" in first:
+                                        response_body = first["value"]
                         elif "text/plain" in content:
-                            text_content = content["text/plain"]
-                            if "example" in text_content:
-                                response_body = text_content["example"]
+                            tp = content["text/plain"]
+                            if "example" in tp:
+                                response_body = tp["example"]
                                 content_type = "text/plain"
                     break
-
             route = {
                 "path": mockroute_path,
                 "method": method.upper(),
@@ -367,10 +444,8 @@ def import_openapi_spec(path: str) -> dict:
                 "latency_ms": 0,
                 "failure_rate": 0.0,
             }
-
             if content_type != "application/json":
                 route["headers"] = {"Content-Type": content_type}
-
             routes.append(route)
 
     config = {
@@ -382,19 +457,21 @@ def import_openapi_spec(path: str) -> dict:
         },
         "routes": routes,
     }
-
     for route in config["routes"]:
         route["_pattern"] = route_to_pattern(route.get("path", ""))
         route["_path"] = route.get("path", "")
         route["_has_params"] = ":" in route.get("path", "")
-
     return config
 
 
 def find_route(
-    routes: list[dict], method: str, path: str
+    routes: list[dict],
+    method: str,
+    path: str,
+    query_params: dict[str, list[str]] | None = None,
+    request_body: Any = None,
 ) -> tuple[dict | None, dict[str, str]]:
-    """Find a matching route for the given method and path."""
+    """Find matching route with optional query/body matchers."""
     for route in routes:
         if route.get("method", "").upper() != method.upper():
             continue
@@ -402,13 +479,54 @@ def find_route(
         if pattern is None:
             pattern = route_to_pattern(route.get("path", ""))
         match = pattern.match(path)
-        if match:
-            return route, match.groupdict()
+        if not match:
+            continue
+
+        # Check query parameter matching
+        if "match_query" in route:
+            if query_params is None:
+                continue
+            query_match = True
+            for k, v in route["match_query"].items():
+                if k not in query_params:
+                    query_match = False
+                    break
+                query_vals = query_params[k]
+                if isinstance(v, list):
+                    if query_vals != v:
+                        query_match = False
+                        break
+                else:
+                    if query_vals != [v]:
+                        query_match = False
+                        break
+            if not query_match:
+                continue
+
+        # Check body matching
+        if "match_body" in route:
+            if request_body is None:
+                continue
+            if not _match_body(request_body, route["match_body"]):
+                continue
+
+        return route, match.groupdict()
     return None, {}
 
 
+def _match_body(body: Any, match_spec: dict) -> bool:
+    """Check if request body matches the spec (shallow key-value matching)."""
+    if not isinstance(body, dict):
+        return False
+    for k, v in match_spec.items():
+        if k not in body:
+            return False
+        if body[k] != v:
+            return False
+    return True
+
+
 def apply_defaults(route: dict, defaults: dict) -> dict:
-    """Apply default values to a route for fields not explicitly set."""
     merged = dict(defaults)
     merged.update(route)
     if "headers" in defaults and "headers" in route:
@@ -417,7 +535,6 @@ def apply_defaults(route: dict, defaults: dict) -> dict:
 
 
 def format_body(body: Any) -> tuple[bytes, str]:
-    """Format response body and return (encoded_bytes, content_type)."""
     if body is None:
         return b"", "application/json"
     if isinstance(body, str):
@@ -426,23 +543,26 @@ def format_body(body: Any) -> tuple[bytes, str]:
 
 
 def render_template(template: Any, context: dict[str, Any]) -> Any:
-    """Render a template by replacing {{param}} placeholders."""
+    """Render a template with {{param}} placeholders, conditionals, and loops.
+
+    When the entire string is a single placeholder, the original type is preserved.
+    """
     if isinstance(template, str):
+        # Check if entire string is a single placeholder
         full_match = re.fullmatch(r"\{\{([^}]+)\}\}", template)
         if full_match:
             key = full_match.group(1).strip()
-            value = _resolve_key(key, context)
-            if value is not None:
-                return value
-            return template
+            # Skip conditional/loop markers
+            if key.startswith("#"):
+                pass
+            else:
+                value = _resolve_key(key, context)
+                if value is not None:
+                    return value
 
-        result = template
-        for match in re.finditer(r"\{\{([^}]+)\}\}", template):
-            placeholder = match.group(0)
-            key = match.group(1).strip()
-            value = _resolve_key(key, context)
-            if value is not None:
-                result = result.replace(placeholder, str(value))
+        result = _render_conditionals(template, context)
+        result = _render_loops(result, context)
+        result = _render_placeholders(result, context)
         return result
     elif isinstance(template, dict):
         return {k: render_template(v, context) for k, v in template.items()}
@@ -452,11 +572,57 @@ def render_template(template: Any, context: dict[str, Any]) -> Any:
         return template
 
 
+def _render_placeholders(text: str, context: dict[str, Any]) -> str:
+    """Replace {{key}} placeholders with values from context."""
+    result = text
+    for match in re.finditer(r"\{\{([^}#\/]+)\}\}", text):
+        placeholder = match.group(0)
+        key = match.group(1).strip()
+        value = _resolve_key(key, context)
+        if value is not None:
+            result = result.replace(placeholder, str(value))
+    return result
+
+
+def _render_conditionals(text: str, context: dict[str, Any]) -> str:
+    """Process {{#if key}}content{{/if}} blocks."""
+    result = text
+    pattern = r"\{\{#if\s+([^}]+)\}\}(.*?)\{\{/if\}\}"
+    for match in re.finditer(pattern, text, re.DOTALL):
+        full = match.group(0)
+        key = match.group(1).strip()
+        content = match.group(2)
+        value = _resolve_key(key, context)
+        if value:
+            result = result.replace(full, content)
+        else:
+            result = result.replace(full, "")
+    return result
+
+
+def _render_loops(text: str, context: dict[str, Any]) -> str:
+    """Process {{#each items}}content{{/each}} blocks."""
+    result = text
+    pattern = r"\{\{#each\s+([^}]+)\}\}(.*?)\{\{/each\}\}"
+    for match in re.finditer(pattern, text, re.DOTALL):
+        full = match.group(0)
+        key = match.group(1).strip()
+        content = match.group(2)
+        items = _resolve_key(key, context)
+        if isinstance(items, list):
+            rendered = []
+            for item in items:
+                item_context = {**context, "this": item}
+                rendered.append(_render_placeholders(content, item_context))
+            result = result.replace(full, "".join(rendered))
+        else:
+            result = result.replace(full, "")
+    return result
+
+
 def _resolve_key(key: str, context: dict[str, Any]) -> Any:
-    """Resolve a dotted key like 'user.name' or 'items.0' from context."""
     parts = key.split(".")
     current = context
-
     for part in parts:
         if isinstance(current, dict):
             current = current.get(part)
@@ -467,33 +633,25 @@ def _resolve_key(key: str, context: dict[str, Any]) -> Any:
                 return None
         else:
             return None
-
         if current is None:
             return None
-
     return current
 
 
 def parse_query_string(path: str) -> dict[str, list[str]]:
-    """Parse query string from URL path."""
     if "?" not in path:
         return {}
-    query_string = path.split("?", 1)[1]
-    return urllib.parse.parse_qs(query_string)
+    return urllib.parse.parse_qs(path.split("?", 1)[1])
 
 
 def parse_request_body(method: str, headers: dict, rfile) -> Any:
-    """Parse request body based on content type."""
     if method not in ("POST", "PUT", "PATCH"):
         return None
-
     content_length = int(headers.get("Content-Length", 0))
     if content_length == 0:
         return None
-
     content_type = headers.get("Content-Type", "")
     body = rfile.read(content_length)
-
     if "application/json" in content_type:
         try:
             return json.loads(body.decode("utf-8"))
@@ -506,8 +664,6 @@ def parse_request_body(method: str, headers: dict, rfile) -> Any:
 
 
 class MockRouteHandler(BaseHTTPRequestHandler):
-    """HTTP request handler for mock routes."""
-
     config: ClassVar[dict] = {}
     global_latency: int | None = None
     global_failure_rate: float | None = None
@@ -519,20 +675,17 @@ class MockRouteHandler(BaseHTTPRequestHandler):
     rate_limiter: ClassVar[RateLimiter | None] = None
 
     def log_message(self, format: str, *args: Any) -> None:
-        """Override to suppress default logging; we log in handle_request."""
+        pass
 
     def _get_client_ip(self) -> str:
-        """Get client IP address."""
         return self.client_address[0]
 
     def _check_rate_limit(self) -> bool:
-        """Check if request is within rate limit."""
         if self.rate_limiter is None:
             return True
         return self.rate_limiter.is_allowed(self._get_client_ip())
 
     def _get_cors_headers(self) -> dict[str, str]:
-        """Get CORS headers based on configuration."""
         if not self.enable_cors:
             return {}
         return {
@@ -554,7 +707,6 @@ class MockRouteHandler(BaseHTTPRequestHandler):
         headers: dict | None = None,
         skip_body: bool = False,
     ) -> None:
-        """Send an HTTP response with optional CORS headers."""
         encoded_body, content_type = format_body(body)
         self.send_response(status)
         for key, value in self._get_cors_headers().items():
@@ -569,20 +721,16 @@ class MockRouteHandler(BaseHTTPRequestHandler):
             self.wfile.write(encoded_body)
 
     def _handle_request(self, method: str) -> None:
-        """Core request handling logic."""
-        # Strip query string for route matching
         path = self.path.split("?")[0]
 
-        # Rate limiting
         if not self._check_rate_limit():
             self._send_response(429, {"error": "rate limit exceeded"})
             if self.verbose:
                 print(f"RATE LIMITED: {self._get_client_ip()} {method} {path}")
             return
 
-        # Handle Swagger UI requests
         if self.enable_docs:
-            if path == "/docs" or path == "/docs/":
+            if path in ("/docs", "/docs/"):
                 if method == "GET":
                     html = SWAGGER_HTML.format(title="mockroute")
                     encoded = html.encode("utf-8")
@@ -595,7 +743,6 @@ class MockRouteHandler(BaseHTTPRequestHandler):
                 elif method == "OPTIONS":
                     self._send_response(204, None)
                     return
-
             if path == "/openapi.json":
                 if method == "GET":
                     routes = self._get_routes()
@@ -613,61 +760,51 @@ class MockRouteHandler(BaseHTTPRequestHandler):
 
         routes = self._get_routes()
         defaults = self._get_defaults()
-
         start_time = time.monotonic()
 
-        # Handle CORS preflight
         if method == "OPTIONS":
             self._send_response(204, None)
             elapsed = (time.monotonic() - start_time) * 1000
             self._log_request(method, path, None, {}, 204, elapsed, 0)
             return
 
-        # Find matching route (with path parameter extraction)
-        route, path_params = find_route(routes, method, path)
+        query_params = parse_query_string(self.path)
+        request_body = parse_request_body(method, dict(self.headers), self.rfile)
+
+        route, path_params = find_route(
+            routes, method, path, query_params, request_body
+        )
         if route is None:
             self._send_response(404, {"error": "not found", "path": path})
             elapsed = (time.monotonic() - start_time) * 1000
             self._log_request(method, path, None, {}, 404, elapsed, 0)
             return
 
-        # Store path params for logging
         self.path_params = path_params
-
-        # Apply defaults
         route = apply_defaults(route, defaults)
 
-        # Parse query parameters
-        query_params = parse_query_string(self.path)
-
-        # Parse request body
-        request_body = parse_request_body(method, dict(self.headers), self.rfile)
-
-        # Build template context
         context = {
             "path": path_params,
             "query": {k: v[0] if len(v) == 1 else v for k, v in query_params.items()},
             "body": request_body,
         }
 
-        # Determine latency
-        if self.global_latency is not None:
-            latency_ms = self.global_latency
-        else:
-            latency_ms = route.get("latency_ms", 0) or 0
+        latency_ms = (
+            self.global_latency
+            if self.global_latency is not None
+            else route.get("latency_ms", 0) or 0
+        )
         latency_ms = min(latency_ms, MAX_LATENCY_MS)
 
-        # Determine failure rate
-        if self.global_failure_rate is not None:
-            failure_rate = self.global_failure_rate
-        else:
-            failure_rate = route.get("failure_rate", 0.0) or 0.0
+        failure_rate = (
+            self.global_failure_rate
+            if self.global_failure_rate is not None
+            else route.get("failure_rate", 0.0) or 0.0
+        )
 
-        # Apply latency
         if latency_ms > 0:
             time.sleep(latency_ms / 1000.0)
 
-        # Roll for failure
         if failure_rate > 0 and random.random() < failure_rate:
             self._send_response(
                 500, {"error": "internal server error (injected failure)"}
@@ -678,11 +815,8 @@ class MockRouteHandler(BaseHTTPRequestHandler):
             )
             return
 
-        # Send successful response
         status = route.get("status", 200)
         body = route.get("body")
-
-        # Render template if body contains {{}} placeholders
         if body is not None and _has_template(body):
             body = render_template(body, context)
 
@@ -704,7 +838,6 @@ class MockRouteHandler(BaseHTTPRequestHandler):
         elapsed_ms: float,
         latency_ms: int,
     ) -> None:
-        """Log a compact, colored request line."""
         if not self.enable_colors:
             log_line = (
                 f"{method:7} {path:30} {status:3} "
@@ -720,28 +853,21 @@ class MockRouteHandler(BaseHTTPRequestHandler):
 
         method_color = METHOD_COLORS.get(method.upper(), Colors.GRAY)
         status_color = Colors.GREEN if status < 400 else Colors.RED
-
         parts = [
             f"{method_color}{method.upper():<6}{Colors.RESET}",
             f"{path}",
             f"{status_color}{status}{Colors.RESET}",
         ]
-
         if latency_ms > 0:
             parts.append(f"{Colors.GRAY}{latency_ms}ms{Colors.RESET}")
-
         parts.append(f"{Colors.GRAY}{elapsed_ms:.1f}ms{Colors.RESET}")
-
         if matched_route:
             parts.append(f"{Colors.GRAY}{matched_route}{Colors.RESET}")
-
         if path_params:
             params_str = " ".join(f"{k}={v}" for k, v in path_params.items())
             parts.append(f"{Colors.GRAY}({params_str}){Colors.RESET}")
-
         print(" ".join(parts))
 
-        # Verbose logging
         if self.verbose:
             verbose_parts = [f"{Colors.BOLD}Details:{Colors.RESET}"]
             if path_params:
@@ -774,9 +900,8 @@ class MockRouteHandler(BaseHTTPRequestHandler):
 
 
 def _has_template(value: Any) -> bool:
-    """Check if a value contains {{}} template placeholders."""
     if isinstance(value, str):
-        return bool(re.search(r"\{\{[^}]+\}\}", value))
+        return bool(re.search(r"\{\{[#\/]?\s*[^}]+\}\}", value))
     elif isinstance(value, dict):
         return any(_has_template(v) for v in value.values())
     elif isinstance(value, list):
@@ -824,10 +949,7 @@ def main() -> None:
         "--no-docs", action="store_true", help="disable Swagger UI at /docs"
     )
     parser.add_argument(
-        "--cors-origin",
-        type=str,
-        default="*",
-        help="allowed CORS origin (default: *)",
+        "--cors-origin", type=str, default="*", help="allowed CORS origin (default: *)"
     )
     parser.add_argument(
         "--rate-limit",
@@ -852,13 +974,11 @@ def main() -> None:
     if args.no_color:
         Colors.disable()
 
-    # Load config
     if args.openapi:
         config = import_openapi_spec(args.openapi)
     else:
         config = load_config(args.config)
 
-    # Set handler class attributes
     MockRouteHandler.config = config
     MockRouteHandler.global_latency = args.latency
     MockRouteHandler.global_failure_rate = args.failure_rate
@@ -868,7 +988,6 @@ def main() -> None:
     MockRouteHandler.cors_origins = args.cors_origin
     MockRouteHandler.rate_limiter = RateLimiter(max_requests=args.rate_limit)
 
-    # Start server
     server = ThreadingHTTPServer((args.host, args.port), MockRouteHandler)
     print(
         f"{Colors.BOLD}mockroute v{__version__}{Colors.RESET} serving on http://{args.host}:{args.port}"

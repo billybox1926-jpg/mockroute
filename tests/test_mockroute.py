@@ -37,7 +37,6 @@ class TestLoadConfig(unittest.TestCase):
             f.flush()
             config = mockroute.load_config(f.name)
             self.assertEqual(config["routes"][0]["path"], "/test")
-            # Check that _pattern was compiled
             self.assertIn("_pattern", config["routes"][0])
 
     def test_load_missing_file(self):
@@ -1435,8 +1434,285 @@ class TestGenerateOpenAPISpec(unittest.TestCase):
         )
 
 
-if __name__ == "__main__":
-    unittest.main()
+class TestEnhancedTemplating(unittest.TestCase):
+    """Test enhanced template features (conditionals, loops)."""
+
+    def test_conditional_true(self):
+        """{{#if key}}block{{/if}} renders when key is truthy."""
+        template = "Hello {{#if path.name}}World{{/if}}!"
+        context = {"path": {"name": "World"}, "query": {}, "body": None}
+        result = mockroute.render_template(template, context)
+        self.assertEqual(result, "Hello World!")
+
+    def test_conditional_false(self):
+        """{{#if key}}block{{/if}} omitted when key is falsy."""
+        template = "Hello {{#if path.name}}World{{/if}}!"
+        context = {"path": {}, "query": {}, "body": None}
+        result = mockroute.render_template(template, context)
+        self.assertEqual(result, "Hello !")
+
+    def test_conditional_with_nested_key(self):
+        """Conditional works with nested keys."""
+        template = "{{#if body.user.admin}}Admin{{/if}}"
+        context = {"path": {}, "query": {}, "body": {"user": {"admin": True}}}
+        result = mockroute.render_template(template, context)
+        self.assertEqual(result, "Admin")
+
+    def test_loop_rendering(self):
+        """{{#each items}}block{{/each}} renders for each item."""
+        template = "{{#each body.items}}[{{this}}]{{/each}}"
+        context = {"path": {}, "query": {}, "body": {"items": ["a", "b", "c"]}}
+        result = mockroute.render_template(template, context)
+        self.assertEqual(result, "[a][b][c]")
+
+    def test_loop_with_nested_placeholder(self):
+        """Loop can use this for current item."""
+        template = "{{#each body.items}}Item: {{this}},{{/each}}"
+        context = {"path": {}, "query": {}, "body": {"items": ["x", "y"]}}
+        result = mockroute.render_template(template, context)
+        self.assertEqual(result, "Item: x,Item: y,")
+
+    def test_loop_empty_list(self):
+        """Empty list renders nothing."""
+        template = "Start{{#each body.items}}{{this}}{{/each}}End"
+        context = {"path": {}, "query": {}, "body": {"items": []}}
+        result = mockroute.render_template(template, context)
+        self.assertEqual(result, "StartEnd")
+
+    def test_loop_non_list(self):
+        """Non-list value renders nothing."""
+        template = "{{#each body.items}}{{this}}{{/each}}"
+        context = {"path": {}, "query": {}, "body": {"items": "notalist"}}
+        result = mockroute.render_template(template, context)
+        self.assertEqual(result, "")
+
+    def test_combined_conditionals_and_loops(self):
+        """Conditionals and loops can be combined."""
+        template = "{{#if body.items}}{{#each body.items}}{{this}},{{/each}}{{/if}}"
+        context = {"path": {}, "query": {}, "body": {"items": ["a", "b"]}}
+        result = mockroute.render_template(template, context)
+        self.assertEqual(result, "a,b,")
+
+    def test_template_with_all_features(self):
+        """Template with placeholders, conditionals, and loops."""
+        template = {
+            "message": "Hello {{path.name}}!",
+            "items": "{{#each body.items}}{{this}},{{/each}}",
+            "admin": "{{#if body.admin}}yes{{/if}}",
+        }
+        context = {
+            "path": {"name": "Alice"},
+            "query": {},
+            "body": {"items": ["x", "y"], "admin": True},
+        }
+        result = mockroute.render_template(template, context)
+        self.assertEqual(result["message"], "Hello Alice!")
+        self.assertEqual(result["items"], "x,y,")
+        self.assertEqual(result["admin"], "yes")
+
+
+class TestQueryParameterMatching(unittest.TestCase):
+    """Test query parameter matching for routes."""
+
+    def test_match_query_params(self):
+        """Route matches when query params match."""
+        routes = [
+            {
+                "path": "/api/users",
+                "method": "GET",
+                "match_query": {"role": "admin"},
+                "_pattern": mockroute.route_to_pattern("/api/users"),
+                "_path": "/api/users",
+                "_has_params": False,
+            }
+        ]
+        route, _ = mockroute.find_route(
+            routes, "GET", "/api/users", {"role": ["admin"]}, None
+        )
+        self.assertIsNotNone(route)
+
+    def test_reject_query_params_mismatch(self):
+        """Route rejects when query params don't match."""
+        routes = [
+            {
+                "path": "/api/users",
+                "method": "GET",
+                "match_query": {"role": "admin"},
+                "_pattern": mockroute.route_to_pattern("/api/users"),
+                "_path": "/api/users",
+                "_has_params": False,
+            }
+        ]
+        route, _ = mockroute.find_route(
+            routes, "GET", "/api/users", {"role": ["user"]}, None
+        )
+        self.assertIsNone(route)
+
+    def test_reject_missing_query_param(self):
+        """Route rejects when expected query param is missing."""
+        routes = [
+            {
+                "path": "/api/users",
+                "method": "GET",
+                "match_query": {"role": "admin"},
+                "_pattern": mockroute.route_to_pattern("/api/users"),
+                "_path": "/api/users",
+                "_has_params": False,
+            }
+        ]
+        route, _ = mockroute.find_route(routes, "GET", "/api/users", {}, None)
+        self.assertIsNone(route)
+
+    def test_no_match_query_accepts_any(self):
+        """Route without match_query accepts any query params."""
+        routes = [
+            {
+                "path": "/api/users",
+                "method": "GET",
+                "_pattern": mockroute.route_to_pattern("/api/users"),
+                "_path": "/api/users",
+                "_has_params": False,
+            }
+        ]
+        route, _ = mockroute.find_route(
+            routes, "GET", "/api/users", {"foo": ["bar"]}, None
+        )
+        self.assertIsNotNone(route)
+
+    def test_match_multiple_query_params(self):
+        """Route matches multiple query params."""
+        routes = [
+            {
+                "path": "/api/users",
+                "method": "GET",
+                "match_query": {"role": "admin", "active": "true"},
+                "_pattern": mockroute.route_to_pattern("/api/users"),
+                "_path": "/api/users",
+                "_has_params": False,
+            }
+        ]
+        route, _ = mockroute.find_route(
+            routes, "GET", "/api/users", {"role": ["admin"], "active": ["true"]}, None
+        )
+        self.assertIsNotNone(route)
+
+
+class TestBodyMatching(unittest.TestCase):
+    """Test request body inspection for routing."""
+
+    def test_match_body_fields(self):
+        """Route matches when body fields match spec."""
+        routes = [
+            {
+                "path": "/api/users",
+                "method": "POST",
+                "match_body": {"type": "admin"},
+                "_pattern": mockroute.route_to_pattern("/api/users"),
+                "_path": "/api/users",
+                "_has_params": False,
+            }
+        ]
+        route, _ = mockroute.find_route(
+            routes, "POST", "/api/users", {}, {"type": "admin", "name": "Alice"}
+        )
+        self.assertIsNotNone(route)
+
+    def test_reject_body_mismatch(self):
+        """Route rejects when body fields don't match."""
+        routes = [
+            {
+                "path": "/api/users",
+                "method": "POST",
+                "match_body": {"type": "admin"},
+                "_pattern": mockroute.route_to_pattern("/api/users"),
+                "_path": "/api/users",
+                "_has_params": False,
+            }
+        ]
+        route, _ = mockroute.find_route(
+            routes, "POST", "/api/users", {}, {"type": "user", "name": "Bob"}
+        )
+        self.assertIsNone(route)
+
+    def test_reject_body_missing(self):
+        """Route rejects when body is missing."""
+        routes = [
+            {
+                "path": "/api/users",
+                "method": "POST",
+                "match_body": {"type": "admin"},
+                "_pattern": mockroute.route_to_pattern("/api/users"),
+                "_path": "/api/users",
+                "_has_params": False,
+            }
+        ]
+        route, _ = mockroute.find_route(routes, "POST", "/api/users", {}, None)
+        self.assertIsNone(route)
+
+
+class TestYAMLConfig(unittest.TestCase):
+    """Test YAML config loading."""
+
+    def _load_yaml(self, content: str, suffix: str = ".yaml") -> dict:
+        """Helper to load YAML config from string."""
+        import os
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=suffix, delete=False) as f:
+            f.write(content)
+            f.flush()
+            path = f.name
+
+        try:
+            return mockroute.load_config(path)
+        finally:
+            os.unlink(path)
+
+    def test_load_simple_yaml(self):
+        """Simple YAML config loads correctly."""
+        config = self._load_yaml("""
+defaults:
+  status: 200
+  headers:
+    Content-Type: application/json
+routes:
+  - path: /health
+    method: GET
+    status: 200
+    body:
+      status: ok
+""")
+        self.assertEqual(len(config["routes"]), 1)
+        self.assertEqual(config["routes"][0]["path"], "/health")
+        self.assertEqual(config["routes"][0]["method"], "GET")
+        self.assertEqual(config["routes"][0]["body"], {"status": "ok"})
+
+    def test_load_yaml_list_values(self):
+        """YAML with list values loads correctly."""
+        config = self._load_yaml(
+            """
+routes:
+  - path: /api/users
+    method: GET
+    body:
+      - id: 1
+        name: Alice
+      - id: 2
+        name: Bob
+""",
+            ".yml",
+        )
+        self.assertEqual(len(config["routes"]), 1)
+        self.assertIsInstance(config["routes"][0]["body"], list)
+
+    def test_yaml_extension_detection(self):
+        """YAML is detected by file extension."""
+        config = self._load_yaml("""
+routes:
+  - path: /test
+    method: GET
+""")
+        self.assertEqual(len(config["routes"]), 1)
 
 
 class TestConfigValidation(unittest.TestCase):
@@ -1547,3 +1823,7 @@ class TestCORSConfiguration(unittest.TestCase):
         handler.enable_cors = False
         headers = handler._get_cors_headers()
         self.assertEqual(headers, {})
+
+
+if __name__ == "__main__":
+    unittest.main()

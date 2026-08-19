@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mockroute"
-version = "0.6.0"
+version = "0.7.0"
 description = "Zero-dependency local mock API server with latency and failure injection"
 readme = "README.md"
 license = {text = "MIT"}

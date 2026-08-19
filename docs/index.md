@@ -2,9 +2,6 @@
 
 **Zero-dependency local mock API server.**
 
-[![CI](https://github.com/billybox1926-jpg/mockroute/actions/workflows/test.yml/badge.svg)](https://github.com/billybox1926-jpg/mockroute/actions/workflows/test.yml)
-[![Docs](https://img.shields.io/badge/docs-mkdocs-blue)](https://billybox1926-jpg.github.io/mockroute/)
-
 Point it at a JSON or YAML route file, and it serves fake responses with configurable latency, failure injection, CORS support, path parameters, dynamic responses, templating, Swagger UI documentation, and OpenAPI import.
 
 ## Quick Start

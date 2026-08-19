@@ -1,0 +1,51 @@
+site_name: mockroute
+site_description: Zero-dependency local mock API server
+repo_url: https://github.com/billybox1926-jpg/mockroute
+repo_name: billybox1926-jpg/mockroute
+
+theme:
+  name: material
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - search.suggest
+    - content.code.copy
+  palette:
+    - scheme: default
+      primary: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to light mode
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - admonition
+  - tables
+
+plugins:
+  - search
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - Configuration:
+      - Routes: configuration.md
+      - Path Parameters: features/path-params.md
+      - Dynamic Responses: features/dynamic-responses.md
+      - Templating: features/templating.md
+  - Features:
+      - Rate Limiting: features/rate-limiting.md
+      - CORS: features/cors.md
+      - OpenAPI Import: features/openapi.md
+      - Swagger UI: features/swagger-ui.md
+  - Examples: examples.md
+  - Contributing: contributing.md

@@ -568,5 +568,132 @@ class TestDefaultsApplication(unittest.TestCase):
             thread.join(timeout=5)
 
 
+class TestLatencyCap(unittest.TestCase):
+    """Test that latency is capped to prevent thread exhaustion."""
+
+    def test_latency_capped_at_max(self):
+        """Latency values above MAX_LATENCY_MS are capped."""
+        # Test that the constant exists and has a reasonable value
+        self.assertGreater(mockroute.MAX_LATENCY_MS, 0)
+        self.assertEqual(mockroute.MAX_LATENCY_MS, 10000)  # 10 seconds
+        
+    def test_latency_cap_applied_to_route(self):
+        """Route latency exceeding cap is reduced to MAX_LATENCY_MS."""
+        config = {
+            "routes": [
+                {
+                    "path": "/slow",
+                    "method": "GET",
+                    "status": 200,
+                    "body": {"ok": True},
+                    "latency_ms": 50000,  # 50 seconds, should be capped to 10
+                }
+            ]
+        }
+        mockroute.MockRouteHandler.config = config
+        mockroute.MockRouteHandler.global_latency = None
+        mockroute.MockRouteHandler.global_failure_rate = None
+
+        server = mockroute.ThreadingHTTPServer(
+            ("127.0.0.1", 0), mockroute.MockRouteHandler
+        )
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        try:
+            conn = HTTPConnection("127.0.0.1", port, timeout=15)
+            start = time.monotonic()
+            conn.request("GET", "/slow")
+            resp = conn.getresponse()
+            elapsed = time.monotonic() - start
+            self.assertEqual(resp.status, 200)
+            # Should complete in ~10 seconds (capped), not 50 seconds
+            # Allow some margin for processing overhead
+            self.assertLess(elapsed, 12.0)  # Less than 12 seconds
+            self.assertGreater(elapsed, 9.0)  # But more than 9 seconds (cap applied)
+            conn.close()
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+
+    def test_global_latency_capped(self):
+        """Global latency argument is also capped."""
+        config = {
+            "routes": [
+                {
+                    "path": "/test",
+                    "method": "GET",
+                    "status": 200,
+                    "body": {"ok": True},
+                    "latency_ms": 0,  # Route has no latency
+                }
+            ]
+        }
+        mockroute.MockRouteHandler.config = config
+        mockroute.MockRouteHandler.global_latency = 30000  # 30 seconds via CLI arg
+        mockroute.MockRouteHandler.global_failure_rate = None
+
+        server = mockroute.ThreadingHTTPServer(
+            ("127.0.0.1", 0), mockroute.MockRouteHandler
+        )
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        try:
+            conn = HTTPConnection("127.0.0.1", port, timeout=15)
+            start = time.monotonic()
+            conn.request("GET", "/test")
+            resp = conn.getresponse()
+            elapsed = time.monotonic() - start
+            self.assertEqual(resp.status, 200)
+            # Should complete in ~10 seconds (capped), not 30 seconds
+            self.assertLess(elapsed, 12.0)
+            self.assertGreater(elapsed, 9.0)
+            conn.close()
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+
+    def test_latency_under_cap_unchanged(self):
+        """Latency values under the cap are not affected."""
+        config = {
+            "routes": [
+                {
+                    "path": "/fast",
+                    "method": "GET",
+                    "status": 200,
+                    "body": {"ok": True},
+                    "latency_ms": 100,  # 100ms, well under cap
+                }
+            ]
+        }
+        mockroute.MockRouteHandler.config = config
+        mockroute.MockRouteHandler.global_latency = None
+        mockroute.MockRouteHandler.global_failure_rate = None
+
+        server = mockroute.ThreadingHTTPServer(
+            ("127.0.0.1", 0), mockroute.MockRouteHandler
+        )
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        try:
+            conn = HTTPConnection("127.0.0.1", port, timeout=5)
+            start = time.monotonic()
+            conn.request("GET", "/fast")
+            resp = conn.getresponse()
+            elapsed = time.monotonic() - start
+            self.assertEqual(resp.status, 200)
+            # Should complete in approximately 100ms
+            self.assertLess(elapsed, 0.5)  # Less than 500ms
+            conn.close()
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+
+
 if __name__ == "__main__":
     unittest.main()

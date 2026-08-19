@@ -15,7 +15,7 @@ import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 __version__ = "0.1.0"
 
@@ -23,6 +23,9 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
 DEFAULT_CONFIG = "routes.json"
 MAX_LATENCY_MS = 10000  # Cap latency to prevent thread exhaustion
+
+# Maximum allowed latency in ms (prevents thread exhaustion)
+MAX_LATENCY_MS = 60000
 
 CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
@@ -44,15 +47,17 @@ def load_config(path: str) -> dict:
         print(f"Error: invalid JSON in {path}: {e}", file=sys.stderr)
         sys.exit(1)
     if not isinstance(config, dict):
-        print(f"Error: config must be a JSON object", file=sys.stderr)
+        print("Error: config must be a JSON object", file=sys.stderr)
         sys.exit(1)
     return config
 
 
 def find_route(routes: list[dict], method: str, path: str) -> dict | None:
     """Find a matching route for the given method and path (exact match)."""
+    # Strip query string before matching
+    clean_path = path.split("?")[0]
     for route in routes:
-        if route.get("method") == method and route.get("path") == path:
+        if route.get("method") == method and route.get("path") == clean_path:
             return route
     return None
 
@@ -79,7 +84,7 @@ def format_body(body: Any) -> tuple[bytes, str]:
 class MockRouteHandler(BaseHTTPRequestHandler):
     """HTTP request handler for mock routes."""
 
-    config: dict = {}
+    config: ClassVar[dict] = {}
     global_latency: int | None = None
     global_failure_rate: float | None = None
     enable_cors: bool = True
@@ -99,6 +104,7 @@ class MockRouteHandler(BaseHTTPRequestHandler):
         status: int,
         body: Any = None,
         headers: dict | None = None,
+        skip_body: bool = False,
     ) -> None:
         """Send an HTTP response with optional CORS headers."""
         encoded_body, content_type = format_body(body)
@@ -112,7 +118,7 @@ class MockRouteHandler(BaseHTTPRequestHandler):
                 self.send_header(key, value)
         self.send_header("Content-Length", str(len(encoded_body)))
         self.end_headers()
-        if encoded_body:
+        if encoded_body and not skip_body:
             self.wfile.write(encoded_body)
 
     def _handle_request(self, method: str) -> None:
@@ -147,6 +153,7 @@ class MockRouteHandler(BaseHTTPRequestHandler):
             latency_ms = self.global_latency
         else:
             latency_ms = route.get("latency_ms", 0) or 0
+        latency_ms = min(latency_ms, MAX_LATENCY_MS)
 
         # Cap latency to prevent thread exhaustion
         latency_ms = min(latency_ms, MAX_LATENCY_MS)
@@ -174,7 +181,9 @@ class MockRouteHandler(BaseHTTPRequestHandler):
         status = route.get("status", 200)
         body = route.get("body")
         route_headers = route.get("headers", {})
-        self._send_response(status, body, route_headers)
+        # HEAD requests must not include a response body
+        skip_body = method == "HEAD"
+        self._send_response(status, body, route_headers, skip_body=skip_body)
         elapsed = (time.monotonic() - start_time) * 1000
         self._log_request(method, path, route.get("path"), status, elapsed, latency_ms)
 
@@ -188,7 +197,6 @@ class MockRouteHandler(BaseHTTPRequestHandler):
         latency_ms: int,
     ) -> None:
         """Log a compact request line."""
-        route_info = f" -> {matched_route}" if matched_route else " -> (no match)"
         log_line = (
             f"{method:7} {path:30} {status:3} "
             f"{latency_ms:4}ms sleep | {elapsed_ms:6.1f}ms total"
@@ -211,6 +219,9 @@ class MockRouteHandler(BaseHTTPRequestHandler):
 
     def do_PATCH(self) -> None:
         self._handle_request("PATCH")
+
+    def do_HEAD(self) -> None:
+        self._handle_request("HEAD")
 
     def do_OPTIONS(self) -> None:
         self._handle_request("OPTIONS")

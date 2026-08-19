@@ -58,6 +58,12 @@ class TestFindRoute(unittest.TestCase):
         self.assertEqual(result["path"], "/health")
         self.assertEqual(result["method"], "GET")
 
+    def test_query_string_stripped(self):
+        """Query string is stripped before matching."""
+        routes = [{"path": "/api/users", "method": "GET"}]
+        result = mockroute.find_route(routes, "GET", "/api/users?limit=10")
+        self.assertEqual(result["path"], "/api/users")
+
     def test_method_mismatch(self):
         """No match when method differs."""
         routes = [{"path": "/api/users", "method": "GET"}]
@@ -110,6 +116,14 @@ class TestApplyDefaults(unittest.TestCase):
         result = mockroute.apply_defaults(route, defaults)
         self.assertEqual(result["status"], 201)
         self.assertEqual(result["latency_ms"], 50)
+
+    def test_headers_merged_not_overwritten(self):
+        """Headers from defaults and route are merged, not overwritten."""
+        defaults = {"headers": {"Content-Type": "application/json"}}
+        route = {"path": "/test", "method": "GET", "headers": {"X-Custom": "true"}}
+        result = mockroute.apply_defaults(route, defaults)
+        self.assertEqual(result["headers"]["Content-Type"], "application/json")
+        self.assertEqual(result["headers"]["X-Custom"], "true")
 
     def test_empty_defaults(self):
         """Empty defaults don't change route."""
@@ -257,6 +271,11 @@ class TestMockRouteHandler(unittest.TestCase):
         """Shut down the test server."""
         cls.server.shutdown()
         cls.server_thread.join(timeout=5)
+        # Reset class attributes for test isolation
+        mockroute.MockRouteHandler.enable_cors = True
+        mockroute.MockRouteHandler.global_latency = None
+        mockroute.MockRouteHandler.global_failure_rate = None
+        mockroute.MockRouteHandler.verbose = False
 
     def _request(self, method, path, headers=None):
         """Make an HTTP request and return response."""
@@ -511,6 +530,8 @@ class TestNoCors(unittest.TestCase):
         }
         mockroute.MockRouteHandler.config = config
         mockroute.MockRouteHandler.enable_cors = False
+        mockroute.MockRouteHandler.global_latency = None
+        mockroute.MockRouteHandler.global_failure_rate = None
 
         server = mockroute.ThreadingHTTPServer(
             ("127.0.0.1", 0), mockroute.MockRouteHandler
@@ -529,6 +550,8 @@ class TestNoCors(unittest.TestCase):
         finally:
             server.shutdown()
             thread.join(timeout=5)
+            # Reset for other tests
+            mockroute.MockRouteHandler.enable_cors = True
 
 
 class TestDefaultsApplication(unittest.TestCase):
@@ -697,3 +720,96 @@ class TestLatencyCap(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestHeadMethod(unittest.TestCase):
+    """Test HEAD method support."""
+
+    def test_head_returns_headers_no_body(self):
+        """HEAD request returns response without body."""
+        config = {
+            "routes": [
+                {
+                    "path": "/test",
+                    "method": "HEAD",
+                    "status": 200,
+                    "body": {"data": "should not appear"},
+                    "latency_ms": 0,
+                    "failure_rate": 0.0,
+                }
+            ]
+        }
+        mockroute.MockRouteHandler.config = config
+        mockroute.MockRouteHandler.enable_cors = True
+        mockroute.MockRouteHandler.global_latency = None
+        mockroute.MockRouteHandler.global_failure_rate = None
+
+        server = mockroute.ThreadingHTTPServer(
+            ("127.0.0.1", 0), mockroute.MockRouteHandler
+        )
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        try:
+            conn = HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.request("HEAD", "/test")
+            resp = conn.getresponse()
+            body = resp.read()
+            self.assertEqual(resp.status, 200)
+            self.assertEqual(len(body), 0)
+            conn.close()
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+
+
+class TestQueryStringMatching(unittest.TestCase):
+    """Test that query strings don't break route matching."""
+
+    def test_get_with_query_string(self):
+        """GET /api/users?limit=10 matches /api/users route."""
+        config = {
+            "routes": [
+                {
+                    "path": "/api/users",
+                    "method": "GET",
+                    "status": 200,
+                    "body": [{"id": 1}],
+                    "latency_ms": 0,
+                    "failure_rate": 0.0,
+                }
+            ]
+        }
+        mockroute.MockRouteHandler.config = config
+        mockroute.MockRouteHandler.global_latency = None
+        mockroute.MockRouteHandler.global_failure_rate = None
+
+        server = mockroute.ThreadingHTTPServer(
+            ("127.0.0.1", 0), mockroute.MockRouteHandler
+        )
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        try:
+            conn = HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.request("GET", "/api/users?limit=10&offset=0")
+            resp = conn.getresponse()
+            self.assertEqual(resp.status, 200)
+            body = json.loads(resp.read())
+            self.assertEqual(body, [{"id": 1}])
+            conn.close()
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+
+
+class TestLatencyCap(unittest.TestCase):
+    """Test that latency is capped at MAX_LATENCY_MS."""
+
+    def test_latency_capped(self):
+        """Latency values above MAX_LATENCY_MS are capped."""
+        self.assertEqual(mockroute.MAX_LATENCY_MS, 60000)
+        self.assertGreater(mockroute.MAX_LATENCY_MS, 0)
+        self.assertLessEqual(mockroute.MAX_LATENCY_MS, 120000)

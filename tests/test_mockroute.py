@@ -251,7 +251,56 @@ class TestMockRouteHandler(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         """Start a test server in a background thread."""
-        cls.config = mockroute.load_config("routes.example.json")
+        cls.config = {
+            "defaults": {
+                "status": 200,
+                "headers": {"Content-Type": "application/json"},
+                "latency_ms": 0,
+                "failure_rate": 0.0,
+            },
+            "routes": [
+                {
+                    "path": "/health",
+                    "method": "GET",
+                    "status": 200,
+                    "body": {"status": "ok"},
+                    "latency_ms": 0,
+                    "failure_rate": 0.0,
+                },
+                {
+                    "path": "/api/users",
+                    "method": "GET",
+                    "status": 200,
+                    "body": [{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}],
+                    "latency_ms": 0,
+                    "failure_rate": 0.0,
+                },
+                {
+                    "path": "/api/users",
+                    "method": "POST",
+                    "status": 201,
+                    "body": {"created": True},
+                    "latency_ms": 0,
+                    "failure_rate": 0.0,
+                },
+                {
+                    "path": "/api/users/:id/posts/:postId",
+                    "method": "GET",
+                    "status": 200,
+                    "body": {"postId": 7, "title": "Hello World"},
+                    "latency_ms": 0,
+                    "failure_rate": 0.0,
+                },
+                {
+                    "path": "/api/users/:id",
+                    "method": "GET",
+                    "status": 200,
+                    "body": {"id": 1, "name": "Alice"},
+                    "latency_ms": 0,
+                    "failure_rate": 0.0,
+                },
+            ],
+        }
         mockroute.MockRouteHandler.config = cls.config
         mockroute.MockRouteHandler.global_latency = None
         mockroute.MockRouteHandler.global_failure_rate = None
@@ -369,7 +418,7 @@ class TestMockRouteHandler(unittest.TestCase):
         """Multiple path parameters are matched."""
         resp, body = self._request("GET", "/api/users/42/posts/7")
         self.assertEqual(resp.status, 200)
-        self.assertEqual(json.loads(body), {"postId": 42, "title": "Hello World"})
+        self.assertEqual(json.loads(body), {"postId": 7, "title": "Hello World"})
 
 
 class TestFailureInjection(unittest.TestCase):

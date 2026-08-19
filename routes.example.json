@@ -1,0 +1,51 @@
+{
+  "defaults": {
+    "status": 200,
+    "headers": {"Content-Type": "application/json"},
+    "latency_ms": 0,
+    "failure_rate": 0.0
+  },
+  "routes": [
+    {
+      "path": "/health",
+      "method": "GET",
+      "status": 200,
+      "body": {"status": "ok"},
+      "headers": {"Content-Type": "application/json"},
+      "latency_ms": 50,
+      "failure_rate": 0.0
+    },
+    {
+      "path": "/api/users",
+      "method": "GET",
+      "status": 200,
+      "body": [{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}],
+      "latency_ms": 200,
+      "failure_rate": 0.1
+    },
+    {
+      "path": "/api/users",
+      "method": "POST",
+      "status": 201,
+      "body": {"created": true},
+      "latency_ms": 300,
+      "failure_rate": 0.0
+    },
+    {
+      "path": "/api/error",
+      "method": "GET",
+      "status": 500,
+      "body": {"error": "internal server error"},
+      "latency_ms": 0,
+      "failure_rate": 0.0
+    },
+    {
+      "path": "/api/slow",
+      "method": "GET",
+      "status": 200,
+      "body": {"message": "eventually"},
+      "latency_ms": 1000,
+      "failure_rate": 0.0
+    }
+  ]
+}

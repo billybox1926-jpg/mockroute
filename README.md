@@ -132,6 +132,52 @@ The raw OpenAPI spec is available at `http://localhost:8000/openapi.json`.
 
 Disable docs with `--no-docs` if you don't need them.
 
+## Configuration Validation
+
+mockroute validates your configuration at startup:
+
+- Required fields: `path`, `method`
+- Type checking: status (int), latency_ms (number), failure_rate (number)
+- Range validation: status (100-599), failure_rate (0.0-1.0), latency_ms (>= 0)
+- Method validation: must be valid HTTP method
+
+Errors are reported with the route index and field name for easy debugging.
+
+## Rate Limiting
+
+Protect against accidental or malicious overload:
+
+```bash
+# Set custom rate limit (requests per minute per IP)
+python mockroute.py --config routes.json --rate-limit 60
+```
+
+Default: 100 requests/minute/IP. Returns HTTP 429 when exceeded.
+
+## CORS Configuration
+
+Configure allowed origins for browser-based clients:
+
+```bash
+# Restrict to specific origin
+python mockroute.py --config routes.json --cors-origin "http://localhost:3000"
+
+# Disable CORS entirely
+python mockroute.py --config routes.json --no-cors
+```
+
+Default: `*` (all origins). Only applies when CORS is enabled.
+
+## Verbose Mode
+
+Enable detailed request logging for debugging:
+
+```bash
+python mockroute.py --config routes.json --verbose
+```
+
+Shows path parameters, status codes, and timing details for each request.
+
 ## Route Configuration
 
 Create a `routes.json` file:

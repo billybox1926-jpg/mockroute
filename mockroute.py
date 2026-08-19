@@ -4,7 +4,7 @@ mockroute - Zero-dependency local mock API server.
 
 Point it at a JSON route file, and it serves fake responses with
 configurable latency, failure injection, CORS support, path parameters,
-dynamic responses, and Swagger UI documentation.
+dynamic responses, Swagger UI documentation, and OpenAPI import.
 """
 
 from __future__ import annotations
@@ -14,18 +14,21 @@ import json
 import random
 import re
 import sys
+import threading
 import time
 import urllib.parse
+from collections import defaultdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, ClassVar
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
 DEFAULT_CONFIG = "routes.json"
 MAX_LATENCY_MS = 60000  # Cap latency to prevent thread exhaustion (60 seconds)
+DEFAULT_RATE_LIMIT = 100  # Requests per minute per IP
 
 # Swagger UI HTML (loads from CDN)
 SWAGGER_HTML = """<!DOCTYPE html>
@@ -55,12 +58,6 @@ SWAGGER_HTML = """<!DOCTYPE html>
     </script>
 </body>
 </html>"""
-
-CORS_HEADERS = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, PATCH, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
-}
 
 
 class Colors:
@@ -95,32 +92,118 @@ METHOD_COLORS = {
 }
 
 
-def route_to_pattern(route_path: str) -> re.Pattern:
-    """Convert /users/:id to regex that captures :id as named group.
+class RateLimiter:
+    """Simple in-memory rate limiter using token bucket algorithm."""
 
-    Escapes literal characters, then replaces :param with (?P<param>[^/]+).
-    """
-    # Escape everything, then unescape colons (we want : to be special)
+    def __init__(self, max_requests: int = 100, window_seconds: int = 60):
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        self._requests: dict[str, list[float]] = defaultdict(list)
+        self._lock = threading.Lock()
+
+    def is_allowed(self, client_ip: str) -> bool:
+        """Check if request from client_ip is allowed."""
+        now = time.monotonic()
+        with self._lock:
+            # Clean old entries
+            self._requests[client_ip] = [
+                t for t in self._requests[client_ip] if now - t < self.window_seconds
+            ]
+            # Check limit
+            if len(self._requests[client_ip]) >= self.max_requests:
+                return False
+            # Record request
+            self._requests[client_ip].append(now)
+            return True
+
+
+def validate_route(route: dict, index: int) -> list[str]:
+    """Validate a route definition. Returns list of error messages."""
+    errors = []
+
+    # Check required fields
+    if "path" not in route:
+        errors.append(f"Route {index}: missing required field 'path'")
+    elif not isinstance(route["path"], str):
+        errors.append(f"Route {index}: 'path' must be a string")
+    elif not route["path"].startswith("/"):
+        errors.append(f"Route {index}: 'path' must start with /")
+
+    if "method" not in route:
+        errors.append(f"Route {index}: missing required field 'method'")
+    elif not isinstance(route["method"], str):
+        errors.append(f"Route {index}: 'method' must be a string")
+    elif route["method"].upper() not in (
+        "GET",
+        "POST",
+        "PUT",
+        "DELETE",
+        "PATCH",
+        "HEAD",
+        "OPTIONS",
+    ):
+        errors.append(f"Route {index}: 'method' must be a valid HTTP method")
+
+    # Validate types if present
+    if "status" in route:
+        if not isinstance(route["status"], int):
+            errors.append(f"Route {index}: 'status' must be an integer")
+        elif not (100 <= route["status"] <= 599):
+            errors.append(f"Route {index}: 'status' must be between 100 and 599")
+
+    if "latency_ms" in route:
+        if not isinstance(route["latency_ms"], (int, float)):
+            errors.append(f"Route {index}: 'latency_ms' must be a number")
+        elif route["latency_ms"] < 0:
+            errors.append(f"Route {index}: 'latency_ms' must be >= 0")
+
+    if "failure_rate" in route:
+        if not isinstance(route["failure_rate"], (int, float)):
+            errors.append(f"Route {index}: 'failure_rate' must be a number")
+        elif not (0.0 <= route["failure_rate"] <= 1.0):
+            errors.append(f"Route {index}: 'failure_rate' must be between 0.0 and 1.0")
+
+    if "headers" in route and not isinstance(route["headers"], dict):
+        errors.append(f"Route {index}: 'headers' must be an object")
+
+    return errors
+
+
+def validate_config(config: dict) -> list[str]:
+    """Validate entire config. Returns list of error messages."""
+    errors = []
+
+    if "routes" not in config:
+        errors.append("config: missing required field 'routes'")
+    elif not isinstance(config["routes"], list):
+        errors.append("config: 'routes' must be an array")
+    else:
+        for i, route in enumerate(config["routes"]):
+            if not isinstance(route, dict):
+                errors.append(f"config: route[{i}] must be an object")
+            else:
+                errors.extend(validate_route(route, i))
+
+    # Validate defaults if present
+    if "defaults" in config:
+        if not isinstance(config["defaults"], dict):
+            errors.append("config: 'defaults' must be an object")
+
+    return errors
+
+
+def route_to_pattern(route_path: str) -> re.Pattern:
+    """Convert /users/:id to regex that captures :id as named group."""
     pattern = re.escape(route_path)
     pattern = pattern.replace(r"\:", ":")
-    # Replace :param with named capture group matching anything except /
     pattern = re.sub(r":([a-zA-Z_][a-zA-Z0-9_]*)", r"(?P<\1>[^/]+)", pattern)
     return re.compile(f"^{pattern}$")
 
 
 def generate_openapi_spec(
-    routes: list[dict], title: str = "Mock API", version: str = "0.4.0"
+    routes: list[dict], title: str = "Mock API", version: str = "0.6.0"
 ) -> dict:
-    """Generate OpenAPI 3.0 spec from route configuration.
-
-    Args:
-        routes: List of route definitions
-        title: API title for the spec
-        version: API version for the spec
-
-    Returns:
-        OpenAPI 3.0 specification as a dictionary
-    """
+    """Generate OpenAPI 3.0 spec from route configuration."""
     spec = {
         "openapi": "3.0.0",
         "info": {
@@ -135,13 +218,11 @@ def generate_openapi_spec(
         path = route.get("path", "")
         method = route.get("method", "GET").lower()
 
-        # Convert :param to {param} for OpenAPI format
         openapi_path = re.sub(r":([a-zA-Z_][a-zA-Z0-9_]*)", r"{\1}", path)
 
         if openapi_path not in spec["paths"]:
             spec["paths"][openapi_path] = {}
 
-        # Build parameter list for path params
         params = []
         for match in re.finditer(r":([a-zA-Z_][a-zA-Z0-9_]*)", path):
             param_name = match.group(1)
@@ -154,17 +235,14 @@ def generate_openapi_spec(
                 }
             )
 
-        # Build response object
         status_code = str(route.get("status", 200))
         response_obj = {"description": f"Response for {method.upper()} {path}"}
 
-        # Try to extract example from body
         body = route.get("body")
         if body is not None:
             content_type = "application/json"
             if isinstance(body, str):
                 content_type = "text/plain"
-
             response_obj["content"] = {content_type: {"example": body}}
 
         route_entry = {
@@ -181,10 +259,7 @@ def generate_openapi_spec(
 
 
 def load_config(path: str) -> dict:
-    """Load route configuration from a JSON file.
-
-    Also pre-compiles regex patterns for routes with path parameters.
-    """
+    """Load route configuration from a JSON file with validation."""
     config_path = Path(path)
     if not config_path.exists():
         print(f"Error: config file not found: {path}", file=sys.stderr)
@@ -199,28 +274,27 @@ def load_config(path: str) -> dict:
         print("Error: config must be a JSON object", file=sys.stderr)
         sys.exit(1)
 
+    # Validate config
+    errors = validate_config(config)
+    if errors:
+        for error in errors:
+            print(f"Error: {error}", file=sys.stderr)
+        sys.exit(1)
+
     # Pre-compile regex patterns for path parameter matching
     defaults = config.get("defaults", {})
     for route in config.get("routes", []):
         route_defaults = dict(defaults)
         route_defaults.update(route)
         route["_pattern"] = route_to_pattern(route.get("path", ""))
-        route["_path"] = route.get("path", "")  # keep original for display
-        # Also store whether this route has path parameters
+        route["_path"] = route.get("path", "")
         route["_has_params"] = ":" in route.get("path", "")
 
     return config
 
 
 def import_openapi_spec(path: str) -> dict:
-    """Import an OpenAPI 3.0 specification and convert to mockroute config.
-
-    Args:
-        path: Path to OpenAPI spec file (JSON or YAML-like JSON)
-
-    Returns:
-        mockroute configuration dictionary
-    """
+    """Import an OpenAPI 3.0 specification and convert to mockroute config."""
     spec_path = Path(path)
     if not spec_path.exists():
         print(f"Error: OpenAPI spec file not found: {path}", file=sys.stderr)
@@ -247,7 +321,6 @@ def import_openapi_spec(path: str) -> dict:
         if not isinstance(path_item, dict):
             continue
 
-        # Convert OpenAPI {param} to mockroute :param format
         mockroute_path = re.sub(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}", r":\1", path_template)
 
         for method in ["get", "post", "put", "delete", "patch", "head", "options"]:
@@ -255,13 +328,11 @@ def import_openapi_spec(path: str) -> dict:
             if not isinstance(operation, dict):
                 continue
 
-            # Extract response info
             responses = operation.get("responses", {})
             status_code = "200"
             response_body = None
             content_type = "application/json"
 
-            # Find first 2xx response
             for code in sorted(responses.keys()):
                 if code.startswith("2"):
                     status_code = code
@@ -297,7 +368,6 @@ def import_openapi_spec(path: str) -> dict:
                 "failure_rate": 0.0,
             }
 
-            # Add Content-Type header if not default
             if content_type != "application/json":
                 route["headers"] = {"Content-Type": content_type}
 
@@ -313,7 +383,6 @@ def import_openapi_spec(path: str) -> dict:
         "routes": routes,
     }
 
-    # Pre-compile regex patterns
     for route in config["routes"]:
         route["_pattern"] = route_to_pattern(route.get("path", ""))
         route["_path"] = route.get("path", "")
@@ -325,15 +394,10 @@ def import_openapi_spec(path: str) -> dict:
 def find_route(
     routes: list[dict], method: str, path: str
 ) -> tuple[dict | None, dict[str, str]]:
-    """Find a matching route for the given method and path.
-
-    Returns (route, path_params) or (None, {}).
-    Path parameters are extracted from the regex match.
-    """
+    """Find a matching route for the given method and path."""
     for route in routes:
         if route.get("method", "").upper() != method.upper():
             continue
-        # Use compiled _pattern if available, otherwise compile on the fly
         pattern = route.get("_pattern")
         if pattern is None:
             pattern = route_to_pattern(route.get("path", ""))
@@ -347,7 +411,6 @@ def apply_defaults(route: dict, defaults: dict) -> dict:
     """Apply default values to a route for fields not explicitly set."""
     merged = dict(defaults)
     merged.update(route)
-    # Ensure headers are merged, not overwritten
     if "headers" in defaults and "headers" in route:
         merged["headers"] = {**defaults["headers"], **route["headers"]}
     return merged
@@ -363,17 +426,8 @@ def format_body(body: Any) -> tuple[bytes, str]:
 
 
 def render_template(template: Any, context: dict[str, Any]) -> Any:
-    """Render a template by replacing {{param}} placeholders.
-
-    Supports:
-    - Simple substitution: {{name}}
-    - Nested access: {{user.name}}
-    - Array access: {{items.0}}
-
-    When the entire string is a single placeholder, the original type is preserved.
-    """
+    """Render a template by replacing {{param}} placeholders."""
     if isinstance(template, str):
-        # Check if entire string is a single placeholder
         full_match = re.fullmatch(r"\{\{([^}]+)\}\}", template)
         if full_match:
             key = full_match.group(1).strip()
@@ -382,12 +436,10 @@ def render_template(template: Any, context: dict[str, Any]) -> Any:
                 return value
             return template
 
-        # Otherwise do string replacement
         result = template
         for match in re.finditer(r"\{\{([^}]+)\}\}", template):
-            placeholder = match.group(0)  # {{name}}
-            key = match.group(1).strip()  # name
-
+            placeholder = match.group(0)
+            key = match.group(1).strip()
             value = _resolve_key(key, context)
             if value is not None:
                 result = result.replace(placeholder, str(value))
@@ -463,9 +515,31 @@ class MockRouteHandler(BaseHTTPRequestHandler):
     enable_docs: bool = True
     enable_colors: bool = True
     verbose: bool = False
+    cors_origins: ClassVar[str] = "*"
+    rate_limiter: ClassVar[RateLimiter | None] = None
 
     def log_message(self, format: str, *args: Any) -> None:
         """Override to suppress default logging; we log in handle_request."""
+
+    def _get_client_ip(self) -> str:
+        """Get client IP address."""
+        return self.client_address[0]
+
+    def _check_rate_limit(self) -> bool:
+        """Check if request is within rate limit."""
+        if self.rate_limiter is None:
+            return True
+        return self.rate_limiter.is_allowed(self._get_client_ip())
+
+    def _get_cors_headers(self) -> dict[str, str]:
+        """Get CORS headers based on configuration."""
+        if not self.enable_cors:
+            return {}
+        return {
+            "Access-Control-Allow-Origin": self.cors_origins,
+            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, PATCH, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization",
+        }
 
     def _get_routes(self) -> list[dict]:
         return self.config.get("routes", [])
@@ -483,9 +557,8 @@ class MockRouteHandler(BaseHTTPRequestHandler):
         """Send an HTTP response with optional CORS headers."""
         encoded_body, content_type = format_body(body)
         self.send_response(status)
-        if self.enable_cors:
-            for key, value in CORS_HEADERS.items():
-                self.send_header(key, value)
+        for key, value in self._get_cors_headers().items():
+            self.send_header(key, value)
         self.send_header("Content-Type", content_type)
         if headers:
             for key, value in headers.items():
@@ -499,6 +572,13 @@ class MockRouteHandler(BaseHTTPRequestHandler):
         """Core request handling logic."""
         # Strip query string for route matching
         path = self.path.split("?")[0]
+
+        # Rate limiting
+        if not self._check_rate_limit():
+            self._send_response(429, {"error": "rate limit exceeded"})
+            if self.verbose:
+                print(f"RATE LIMITED: {self._get_client_ip()} {method} {path}")
+            return
 
         # Handle Swagger UI requests
         if self.enable_docs:
@@ -607,7 +687,6 @@ class MockRouteHandler(BaseHTTPRequestHandler):
             body = render_template(body, context)
 
         route_headers = route.get("headers", {})
-        # HEAD requests must not include a response body
         skip_body = method == "HEAD"
         self._send_response(status, body, route_headers, skip_body=skip_body)
         elapsed = (time.monotonic() - start_time) * 1000
@@ -639,7 +718,6 @@ class MockRouteHandler(BaseHTTPRequestHandler):
             print(log_line)
             return
 
-        # Colored output
         method_color = METHOD_COLORS.get(method.upper(), Colors.GRAY)
         status_color = Colors.GREEN if status < 400 else Colors.RED
 
@@ -662,6 +740,16 @@ class MockRouteHandler(BaseHTTPRequestHandler):
             parts.append(f"{Colors.GRAY}({params_str}){Colors.RESET}")
 
         print(" ".join(parts))
+
+        # Verbose logging
+        if self.verbose:
+            verbose_parts = [f"{Colors.BOLD}Details:{Colors.RESET}"]
+            if path_params:
+                verbose_parts.append(f"path_params={path_params}")
+            verbose_parts.append(f"status={status}")
+            verbose_parts.append(f"latency={latency_ms}ms")
+            verbose_parts.append(f"elapsed={elapsed_ms:.1f}ms")
+            print("  " + " | ".join(verbose_parts))
 
     def do_GET(self) -> None:
         self._handle_request("GET")
@@ -736,6 +824,18 @@ def main() -> None:
         "--no-docs", action="store_true", help="disable Swagger UI at /docs"
     )
     parser.add_argument(
+        "--cors-origin",
+        type=str,
+        default="*",
+        help="allowed CORS origin (default: *)",
+    )
+    parser.add_argument(
+        "--rate-limit",
+        type=int,
+        default=DEFAULT_RATE_LIMIT,
+        help=f"max requests per minute per IP (default: {DEFAULT_RATE_LIMIT})",
+    )
+    parser.add_argument(
         "--latency",
         type=int,
         default=None,
@@ -749,7 +849,6 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # Handle --no-color
     if args.no_color:
         Colors.disable()
 
@@ -766,15 +865,17 @@ def main() -> None:
     MockRouteHandler.enable_cors = not args.no_cors
     MockRouteHandler.enable_docs = not getattr(args, "no_docs", False)
     MockRouteHandler.verbose = args.verbose
+    MockRouteHandler.cors_origins = args.cors_origin
+    MockRouteHandler.rate_limiter = RateLimiter(max_requests=args.rate_limit)
 
     # Start server
     server = ThreadingHTTPServer((args.host, args.port), MockRouteHandler)
     print(
         f"{Colors.BOLD}mockroute v{__version__}{Colors.RESET} serving on http://{args.host}:{args.port}"
     )
-    print(f"Loaded {len(config.get('routes', []))} routes from {args.config}")
+    print(f"Loaded {len(config.get('routes', []))} routes")
     if MockRouteHandler.enable_docs:
-        print(f"API docs available at http://{args.host}:{args.port}/docs")
+        print(f"API docs at http://{args.host}:{args.port}/docs")
     print("Press Ctrl+C to stop")
     print()
 

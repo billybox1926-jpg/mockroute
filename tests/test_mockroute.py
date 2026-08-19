@@ -1437,3 +1437,113 @@ class TestGenerateOpenAPISpec(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestConfigValidation(unittest.TestCase):
+    """Test config validation."""
+
+    def test_valid_route(self):
+        """Valid route returns no errors."""
+        route = {"path": "/test", "method": "GET", "status": 200}
+        errors = mockroute.validate_route(route, 0)
+        self.assertEqual(errors, [])
+
+    def test_missing_path(self):
+        """Missing path returns error."""
+        route = {"method": "GET"}
+        errors = mockroute.validate_route(route, 0)
+        self.assertTrue(any("path" in e for e in errors))
+
+    def test_missing_method(self):
+        """Missing method returns error."""
+        route = {"path": "/test"}
+        errors = mockroute.validate_route(route, 0)
+        self.assertTrue(any("method" in e for e in errors))
+
+    def test_invalid_status_type(self):
+        """Non-integer status returns error."""
+        route = {"path": "/test", "method": "GET", "status": "200"}
+        errors = mockroute.validate_route(route, 0)
+        self.assertTrue(any("status" in e for e in errors))
+
+    def test_status_out_of_range(self):
+        """Status outside 100-599 returns error."""
+        route = {"path": "/test", "method": "GET", "status": 999}
+        errors = mockroute.validate_route(route, 0)
+        self.assertTrue(any("status" in e for e in errors))
+
+    def test_negative_latency(self):
+        """Negative latency returns error."""
+        route = {"path": "/test", "method": "GET", "latency_ms": -1}
+        errors = mockroute.validate_route(route, 0)
+        self.assertTrue(any("latency_ms" in e for e in errors))
+
+    def test_failure_rate_out_of_range(self):
+        """Failure rate > 1.0 returns error."""
+        route = {"path": "/test", "method": "GET", "failure_rate": 1.5}
+        errors = mockroute.validate_route(route, 0)
+        self.assertTrue(any("failure_rate" in e for e in errors))
+
+    def test_invalid_method(self):
+        """Invalid HTTP method returns error."""
+        route = {"path": "/test", "method": "INVALID"}
+        errors = mockroute.validate_route(route, 0)
+        self.assertTrue(any("method" in e for e in errors))
+
+
+class TestRateLimiter(unittest.TestCase):
+    """Test rate limiter."""
+
+    def test_allows_within_limit(self):
+        """Requests within limit are allowed."""
+        limiter = mockroute.RateLimiter(max_requests=5, window_seconds=60)
+        for _ in range(5):
+            self.assertTrue(limiter.is_allowed("127.0.0.1"))
+
+    def test_blocks_over_limit(self):
+        """Requests over limit are blocked."""
+        limiter = mockroute.RateLimiter(max_requests=3, window_seconds=60)
+        for _ in range(3):
+            limiter.is_allowed("127.0.0.1")
+        self.assertFalse(limiter.is_allowed("127.0.0.1"))
+
+    def test_separate_ips(self):
+        """Different IPs have separate limits."""
+        limiter = mockroute.RateLimiter(max_requests=1, window_seconds=60)
+        self.assertTrue(limiter.is_allowed("127.0.0.1"))
+        self.assertFalse(limiter.is_allowed("127.0.0.1"))
+        self.assertTrue(limiter.is_allowed("192.168.1.1"))
+
+
+class TestCORSConfiguration(unittest.TestCase):
+    """Test CORS configuration."""
+
+    def _get_handler(self):
+        """Create a handler instance for testing."""
+        handler = mockroute.MockRouteHandler.__new__(mockroute.MockRouteHandler)
+        return handler
+
+    def test_default_cors_origin(self):
+        """Default CORS origin is wildcard."""
+        handler = self._get_handler()
+        handler.enable_cors = True
+        handler.cors_origins = "*"
+        headers = handler._get_cors_headers()
+        self.assertEqual(headers["Access-Control-Allow-Origin"], "*")
+
+    def test_custom_cors_origin(self):
+        """Custom CORS origin is returned."""
+        handler = self._get_handler()
+        handler.enable_cors = True
+        handler.cors_origins = "http://localhost:3000"
+        headers = handler._get_cors_headers()
+        self.assertEqual(
+            headers["Access-Control-Allow-Origin"], "http://localhost:3000"
+        )
+
+    def test_cors_disabled(self):
+        """CORS headers are empty when disabled."""
+        handler = self._get_handler()
+        handler.enable_cors = False
+        headers = handler._get_cors_headers()
+        self.assertEqual(headers, {})

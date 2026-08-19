@@ -60,6 +60,9 @@ def apply_defaults(route: dict, defaults: dict) -> dict:
     """Apply default values to a route for fields not explicitly set."""
     merged = dict(defaults)
     merged.update(route)
+    # Ensure headers are merged, not overwritten
+    if "headers" in defaults and "headers" in route:
+        merged["headers"] = {**defaults["headers"], **route["headers"]}
     return merged
 
 
@@ -113,7 +116,8 @@ class MockRouteHandler(BaseHTTPRequestHandler):
 
     def _handle_request(self, method: str) -> None:
         """Core request handling logic."""
-        path = self.path
+        # Strip query string for route matching
+        path = self.path.split("?")[0]
         routes = self._get_routes()
         defaults = self._get_defaults()
 

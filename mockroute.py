@@ -20,7 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, ClassVar
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
@@ -207,6 +207,116 @@ def load_config(path: str) -> dict:
         route["_pattern"] = route_to_pattern(route.get("path", ""))
         route["_path"] = route.get("path", "")  # keep original for display
         # Also store whether this route has path parameters
+        route["_has_params"] = ":" in route.get("path", "")
+
+    return config
+
+
+def import_openapi_spec(path: str) -> dict:
+    """Import an OpenAPI 3.0 specification and convert to mockroute config.
+
+    Args:
+        path: Path to OpenAPI spec file (JSON or YAML-like JSON)
+
+    Returns:
+        mockroute configuration dictionary
+    """
+    spec_path = Path(path)
+    if not spec_path.exists():
+        print(f"Error: OpenAPI spec file not found: {path}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        with spec_path.open("r", encoding="utf-8") as f:
+            spec = json.load(f)
+    except json.JSONDecodeError as e:
+        print(f"Error: invalid JSON in {path}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if not isinstance(spec, dict):
+        print("Error: OpenAPI spec must be a JSON object", file=sys.stderr)
+        sys.exit(1)
+
+    if spec.get("openapi") != "3.0.0":
+        print("Warning: Only OpenAPI 3.0.0 is fully supported", file=sys.stderr)
+
+    routes = []
+    paths = spec.get("paths", {})
+
+    for path_template, path_item in paths.items():
+        if not isinstance(path_item, dict):
+            continue
+
+        # Convert OpenAPI {param} to mockroute :param format
+        mockroute_path = re.sub(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}", r":\1", path_template)
+
+        for method in ["get", "post", "put", "delete", "patch", "head", "options"]:
+            operation = path_item.get(method)
+            if not isinstance(operation, dict):
+                continue
+
+            # Extract response info
+            responses = operation.get("responses", {})
+            status_code = "200"
+            response_body = None
+            content_type = "application/json"
+
+            # Find first 2xx response
+            for code in sorted(responses.keys()):
+                if code.startswith("2"):
+                    status_code = code
+                    response = responses[code]
+                    if isinstance(response, dict):
+                        content = response.get("content", {})
+                        if "application/json" in content:
+                            json_content = content["application/json"]
+                            if "example" in json_content:
+                                response_body = json_content["example"]
+                            elif "examples" in json_content:
+                                examples = json_content["examples"]
+                                if examples:
+                                    first_example = next(iter(examples.values()))
+                                    if (
+                                        isinstance(first_example, dict)
+                                        and "value" in first_example
+                                    ):
+                                        response_body = first_example["value"]
+                        elif "text/plain" in content:
+                            text_content = content["text/plain"]
+                            if "example" in text_content:
+                                response_body = text_content["example"]
+                                content_type = "text/plain"
+                    break
+
+            route = {
+                "path": mockroute_path,
+                "method": method.upper(),
+                "status": int(status_code),
+                "body": response_body,
+                "latency_ms": 0,
+                "failure_rate": 0.0,
+            }
+
+            # Add Content-Type header if not default
+            if content_type != "application/json":
+                route["headers"] = {"Content-Type": content_type}
+
+            routes.append(route)
+
+    config = {
+        "defaults": {
+            "status": 200,
+            "headers": {"Content-Type": "application/json"},
+            "latency_ms": 0,
+            "failure_rate": 0.0,
+        },
+        "routes": routes,
+    }
+
+    # Pre-compile regex patterns
+    for route in config["routes"]:
+        route["_pattern"] = route_to_pattern(route.get("path", ""))
+        route["_path"] = route.get("path", "")
         route["_has_params"] = ":" in route.get("path", "")
 
     return config
@@ -600,6 +710,12 @@ def main() -> None:
         help=f"route definition file (default: {DEFAULT_CONFIG})",
     )
     parser.add_argument(
+        "--openapi",
+        type=str,
+        default=None,
+        help="import routes from OpenAPI 3.0 spec (JSON)",
+    )
+    parser.add_argument(
         "--port",
         type=int,
         default=DEFAULT_PORT,
@@ -638,7 +754,10 @@ def main() -> None:
         Colors.disable()
 
     # Load config
-    config = load_config(args.config)
+    if args.openapi:
+        config = import_openapi_spec(args.openapi)
+    else:
+        config = load_config(args.config)
 
     # Set handler class attributes
     MockRouteHandler.config = config

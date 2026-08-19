@@ -69,6 +69,22 @@ mockroute --help
 
 ## Usage
 
+### Import from OpenAPI Spec
+
+Generate mock routes directly from an OpenAPI 3.0 specification:
+
+```bash
+# Import routes from OpenAPI spec
+python mockroute.py --openapi api-spec.json --port 8000
+
+# View auto-generated docs
+open http://localhost:8000/docs
+```
+
+The `--openapi` flag converts `{path}` parameters to `:path` format and extracts response examples as mock bodies.
+
+### Manual Route Configuration
+
 ```bash
 python mockroute.py --help
 python mockroute.py --version

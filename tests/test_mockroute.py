@@ -2,7 +2,9 @@
 """Test suite for mockroute - zero-dependency local mock API server."""
 
 import json
+import os
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -13,13 +15,23 @@ sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent))
 import mockroute
 
 
+def _create_temp_spec(spec: dict) -> str:
+    """Create a temporary JSON file with the spec, return path."""
+    fd, path = tempfile.mkstemp(suffix=".json")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(spec, f)
+        return path
+    except:
+        os.close(fd)
+        raise
+
+
 class TestLoadConfig(unittest.TestCase):
     """Tests for load_config() function."""
 
     def test_load_valid_config(self, tmp_path=None):
         """Load a valid JSON config file."""
-        import tempfile
-
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             json.dump({"routes": [{"path": "/test", "method": "GET"}]}, f)
             f.flush()
@@ -35,8 +47,6 @@ class TestLoadConfig(unittest.TestCase):
 
     def test_load_invalid_json(self):
         """Invalid JSON should exit with error."""
-        import tempfile
-
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             f.write("{invalid json}")
             f.flush()
@@ -73,16 +83,10 @@ class TestFindRoute(unittest.TestCase):
         self.assertEqual(params, {})
 
     def test_query_string_stripped(self):
-        """Query string is stripped before matching (in _handle_request).
-
-        find_route itself does exact matching - query string stripping
-        is the caller's responsibility.
-        """
+        """Query string is stripped before matching (in _handle_request)."""
         routes = self._make_routes({"path": "/api/users", "method": "GET"})
-        # Without stripping, exact match fails
         route, _params = mockroute.find_route(routes, "GET", "/api/users?limit=10")
         self.assertIsNone(route)
-        # With stripping (as done in _handle_request), it matches
         clean_path = "/api/users?limit=10".split("?")[0]
         route, _params = mockroute.find_route(routes, "GET", clean_path)
         self.assertIsNotNone(route)
@@ -316,14 +320,13 @@ class TestMockRouteHandler(unittest.TestCase):
             target=cls.server.serve_forever, daemon=True
         )
         cls.server_thread.start()
-        time.sleep(0.1)  # Give server time to start
+        time.sleep(0.1)
 
     @classmethod
     def tearDownClass(cls):
         """Shut down the test server."""
         cls.server.shutdown()
         cls.server_thread.join(timeout=5)
-        # Reset class attributes for test isolation
         mockroute.MockRouteHandler.enable_cors = True
         mockroute.MockRouteHandler.enable_colors = True
         mockroute.MockRouteHandler.global_latency = None
@@ -533,7 +536,7 @@ class TestGlobalOverrides(unittest.TestCase):
             resp = conn.getresponse()
             elapsed = (time.monotonic() - start) * 1000
             self.assertEqual(resp.status, 200)
-            self.assertGreaterEqual(elapsed, 40)  # Allow small timing variance
+            self.assertGreaterEqual(elapsed, 40)
             conn.close()
         finally:
             server.shutdown()
@@ -616,7 +619,6 @@ class TestNoCors(unittest.TestCase):
         finally:
             server.shutdown()
             thread.join(timeout=5)
-            # Reset for other tests
             mockroute.MockRouteHandler.enable_cors = True
 
 
@@ -651,7 +653,7 @@ class TestDefaultsApplication(unittest.TestCase):
             conn = HTTPConnection("127.0.0.1", port, timeout=5)
             conn.request("GET", "/test")
             resp = conn.getresponse()
-            self.assertEqual(resp.status, 201)  # From defaults
+            self.assertEqual(resp.status, 201)
             conn.close()
         finally:
             server.shutdown()
@@ -847,14 +849,184 @@ class TestRouteToPattern(unittest.TestCase):
 
     def test_numeric_start_param_fails(self):
         """Params starting with numbers should not match."""
-        # This is intentional - params must start with letter or underscore
         pattern = mockroute.route_to_pattern("/api/:123")
-        # :123 should not be treated as a param, so it won't match /api/456
         self.assertIsNone(pattern.match("/api/456"))
 
 
-if __name__ == "__main__":
-    unittest.main()
+class TestOpenAPIImport(unittest.TestCase):
+    """Test OpenAPI 3.0 spec import."""
+
+    def test_import_basic_spec(self):
+        """Import basic OpenAPI spec."""
+        spec = {
+            "openapi": "3.0.0",
+            "info": {"title": "Test API", "version": "1.0.0"},
+            "paths": {
+                "/health": {
+                    "get": {
+                        "summary": "Health check",
+                        "responses": {
+                            "200": {
+                                "description": "OK",
+                                "content": {
+                                    "application/json": {"example": {"status": "ok"}}
+                                },
+                            }
+                        },
+                    }
+                }
+            },
+        }
+        path = _create_temp_spec(spec)
+        try:
+            config = mockroute.import_openapi_spec(path)
+        finally:
+            os.unlink(path)
+
+        self.assertEqual(len(config["routes"]), 1)
+        self.assertEqual(config["routes"][0]["path"], "/health")
+        self.assertEqual(config["routes"][0]["method"], "GET")
+        self.assertEqual(config["routes"][0]["status"], 200)
+        self.assertEqual(config["routes"][0]["body"], {"status": "ok"})
+
+    def test_import_path_params(self):
+        """Path parameters are converted from {id} to :id."""
+        spec = {
+            "openapi": "3.0.0",
+            "info": {"title": "Test API", "version": "1.0.0"},
+            "paths": {
+                "/users/{id}": {
+                    "get": {
+                        "responses": {
+                            "200": {
+                                "description": "OK",
+                                "content": {
+                                    "application/json": {"example": {"id": "123"}}
+                                },
+                            }
+                        }
+                    }
+                }
+            },
+        }
+        path = _create_temp_spec(spec)
+        try:
+            config = mockroute.import_openapi_spec(path)
+        finally:
+            os.unlink(path)
+
+        self.assertEqual(config["routes"][0]["path"], "/users/:id")
+        self.assertTrue(config["routes"][0]["_has_params"])
+
+    def test_import_multiple_methods(self):
+        """Multiple HTTP methods on same path are imported."""
+        spec = {
+            "openapi": "3.0.0",
+            "info": {"title": "Test API", "version": "1.0.0"},
+            "paths": {
+                "/users": {
+                    "get": {"responses": {"200": {"description": "OK"}}},
+                    "post": {"responses": {"201": {"description": "Created"}}},
+                }
+            },
+        }
+        path = _create_temp_spec(spec)
+        try:
+            config = mockroute.import_openapi_spec(path)
+        finally:
+            os.unlink(path)
+
+        methods = {r["method"] for r in config["routes"]}
+        self.assertIn("GET", methods)
+        self.assertIn("POST", methods)
+
+    def test_import_multiple_status_codes(self):
+        """First 2xx response is used."""
+        spec = {
+            "openapi": "3.0.0",
+            "info": {"title": "Test API", "version": "1.0.0"},
+            "paths": {
+                "/test": {
+                    "get": {
+                        "responses": {
+                            "200": {
+                                "description": "OK",
+                                "content": {
+                                    "application/json": {
+                                        "example": {"result": "success"}
+                                    }
+                                },
+                            },
+                            "404": {"description": "Not Found"},
+                        }
+                    }
+                }
+            },
+        }
+        path = _create_temp_spec(spec)
+        try:
+            config = mockroute.import_openapi_spec(path)
+        finally:
+            os.unlink(path)
+
+        self.assertEqual(config["routes"][0]["status"], 200)
+        self.assertEqual(config["routes"][0]["body"], {"result": "success"})
+
+    def test_import_text_plain_response(self):
+        """Text/plain responses are handled."""
+        spec = {
+            "openapi": "3.0.0",
+            "info": {"title": "Test API", "version": "1.0.0"},
+            "paths": {
+                "/text": {
+                    "get": {
+                        "responses": {
+                            "200": {
+                                "description": "OK",
+                                "content": {"text/plain": {"example": "Hello World"}},
+                            }
+                        }
+                    }
+                }
+            },
+        }
+        path = _create_temp_spec(spec)
+        try:
+            config = mockroute.import_openapi_spec(path)
+        finally:
+            os.unlink(path)
+
+        self.assertEqual(config["routes"][0]["body"], "Hello World")
+
+    def test_import_no_example(self):
+        """Responses without examples return None body."""
+        spec = {
+            "openapi": "3.0.0",
+            "info": {"title": "Test API", "version": "1.0.0"},
+            "paths": {"/test": {"get": {"responses": {"200": {"description": "OK"}}}}},
+        }
+        path = _create_temp_spec(spec)
+        try:
+            config = mockroute.import_openapi_spec(path)
+        finally:
+            os.unlink(path)
+
+        self.assertIsNone(config["routes"][0]["body"])
+
+    def test_import_empty_paths(self):
+        """Empty paths return empty routes."""
+        spec = {
+            "openapi": "3.0.0",
+            "info": {"title": "Test API", "version": "1.0.0"},
+            "paths": {},
+        }
+        path = _create_temp_spec(spec)
+        try:
+            config = mockroute.import_openapi_spec(path)
+        finally:
+            os.unlink(path)
+
+        self.assertEqual(len(config["routes"]), 0)
 
 
 class TestDynamicResponses(unittest.TestCase):
@@ -1037,7 +1209,6 @@ class TestDynamicResponseIntegration(unittest.TestCase):
 
     def test_no_template_static_response(self):
         """Routes without templates still work (backward compatible)."""
-        # Add a static route
         self.config["routes"].append(
             {
                 "path": "/static",
@@ -1148,7 +1319,6 @@ class TestSwaggerUI(unittest.TestCase):
 
     def test_docs_disabled_when_flag_set(self):
         """Docs are disabled when --no-docs is used."""
-        # Create a new server with docs disabled
         mockroute.MockRouteHandler.enable_docs = False
 
         server = mockroute.ThreadingHTTPServer(
@@ -1162,7 +1332,7 @@ class TestSwaggerUI(unittest.TestCase):
             conn = HTTPConnection("127.0.0.1", port, timeout=5)
             conn.request("GET", "/docs")
             resp = conn.getresponse()
-            self.assertEqual(resp.status, 404)  # Falls through to normal 404
+            self.assertEqual(resp.status, 404)
             conn.close()
         finally:
             server.shutdown()
@@ -1213,11 +1383,9 @@ class TestGenerateOpenAPISpec(unittest.TestCase):
 
         spec = mockroute.generate_openapi_spec(routes)
 
-        # Should use OpenAPI format {id}, not :id
         self.assertIn("/api/users/{id}", spec["paths"])
         self.assertNotIn("/api/users/:id", spec["paths"])
 
-        # Should have parameter definition
         params = spec["paths"]["/api/users/{id}"]["get"]["parameters"]
         self.assertEqual(len(params), 1)
         self.assertEqual(params[0]["name"], "id")
@@ -1265,3 +1433,7 @@ class TestGenerateOpenAPISpec(unittest.TestCase):
         self.assertEqual(
             response["content"]["application/json"]["example"], {"key": "value"}
         )
+
+
+if __name__ == "__main__":
+    unittest.main()

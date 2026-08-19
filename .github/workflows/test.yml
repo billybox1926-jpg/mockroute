@@ -47,8 +47,8 @@ jobs:
 
     - name: Run ruff check
       run: |
-        ruff check mockroute.py tests/test_mockroute.py
+        ruff check mockroute.py tests/test_mockroute.py --config pyproject.toml
 
     - name: Run ruff format check
       run: |
-        ruff format --check mockroute.py tests/test_mockroute.py
+        ruff format --check mockroute.py tests/test_mockroute.py --config pyproject.toml

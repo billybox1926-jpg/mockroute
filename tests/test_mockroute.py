@@ -857,6 +857,203 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class TestDynamicResponses(unittest.TestCase):
+    """Test dynamic response template rendering."""
+
+    def test_simple_template_rendering(self):
+        """Simple {{param}} substitution works."""
+        template = {"message": "Hello, {{path.name}}!"}
+        context = {"path": {"name": "World"}, "query": {}, "body": None}
+        result = mockroute.render_template(template, context)
+        self.assertEqual(result, {"message": "Hello, World!"})
+
+    def test_nested_template_rendering(self):
+        """Nested {{user.name}} substitution works."""
+        template = {"greeting": "Hello, {{body.user.name}}!"}
+        context = {"path": {}, "query": {}, "body": {"user": {"name": "Alice"}}}
+        result = mockroute.render_template(template, context)
+        self.assertEqual(result, {"greeting": "Hello, Alice!"})
+
+    def test_query_param_in_template(self):
+        """Query parameters can be used in templates."""
+        template = {"search": "Results for: {{query.q}}"}
+        context = {"path": {}, "query": {"q": "test"}, "body": None}
+        result = mockroute.render_template(template, context)
+        self.assertEqual(result, {"search": "Results for: test"})
+
+    def test_path_param_in_template(self):
+        """Path parameters can be used in templates."""
+        template = {"id": "{{path.id}}"}
+        context = {"path": {"id": "123"}, "query": {}, "body": None}
+        result = mockroute.render_template(template, context)
+        self.assertEqual(result, {"id": "123"})
+
+    def test_request_body_in_template(self):
+        """Request body can be used in templates."""
+        template = {"echo": "{{body}}"}
+        context = {"path": {}, "query": {}, "body": {"key": "value"}}
+        result = mockroute.render_template(template, context)
+        self.assertEqual(result, {"echo": {"key": "value"}})
+
+    def test_missing_param_unchanged(self):
+        """Missing parameters leave placeholder unchanged."""
+        template = {"msg": "Hello, {{unknown}}!"}
+        context = {"path": {}, "query": {}, "body": None}
+        result = mockroute.render_template(template, context)
+        self.assertEqual(result, {"msg": "Hello, {{unknown}}!"})
+
+    def test_list_template_rendering(self):
+        """Templates in lists are rendered."""
+        template = ["{{path.a}}", "{{path.b}}"]
+        context = {"path": {"a": "1", "b": "2"}, "query": {}, "body": None}
+        result = mockroute.render_template(template, context)
+        self.assertEqual(result, ["1", "2"])
+
+    def test_array_index_access(self):
+        """Array index access works: {{body.items.0}}."""
+        template = {"first": "{{body.items.0}}"}
+        context = {"path": {}, "query": {}, "body": {"items": ["a", "b", "c"]}}
+        result = mockroute.render_template(template, context)
+        self.assertEqual(result, {"first": "a"})
+
+    def test_parse_query_string(self):
+        """Query string parsing works."""
+        result = mockroute.parse_query_string("/test?a=1&b=2&a=3")
+        self.assertEqual(result, {"a": ["1", "3"], "b": ["2"]})
+
+    def test_parse_query_string_empty(self):
+        """Empty query string returns empty dict."""
+        result = mockroute.parse_query_string("/test")
+        self.assertEqual(result, {})
+
+    def test_has_template(self):
+        """Template detection works."""
+        self.assertTrue(mockroute._has_template("Hello {{name}}"))
+        self.assertTrue(mockroute._has_template({"key": "{{val}}"}))
+        self.assertTrue(mockroute._has_template(["{{item}}"]))
+        self.assertFalse(mockroute._has_template("No template"))
+        self.assertFalse(mockroute._has_template({"key": "value"}))
+        self.assertFalse(mockroute._has_template(42))
+
+
+class TestDynamicResponseIntegration(unittest.TestCase):
+    """Integration tests for dynamic responses."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Start a test server with dynamic routes."""
+        cls.config = {
+            "defaults": {
+                "status": 200,
+                "headers": {"Content-Type": "application/json"},
+                "latency_ms": 0,
+                "failure_rate": 0.0,
+            },
+            "routes": [
+                {
+                    "path": "/api/users/:id",
+                    "method": "GET",
+                    "status": 200,
+                    "body": {"id": "{{path.id}}", "name": "User {{path.id}}"},
+                    "latency_ms": 0,
+                    "failure_rate": 0.0,
+                },
+                {
+                    "path": "/api/search",
+                    "method": "GET",
+                    "status": 200,
+                    "body": {"query": "{{query.q}}", "results": []},
+                    "latency_ms": 0,
+                    "failure_rate": 0.0,
+                },
+                {
+                    "path": "/api/echo",
+                    "method": "POST",
+                    "status": 200,
+                    "body": {"echo": "{{body}}"},
+                    "latency_ms": 0,
+                    "failure_rate": 0.0,
+                },
+            ],
+        }
+        mockroute.MockRouteHandler.config = cls.config
+        mockroute.MockRouteHandler.global_latency = None
+        mockroute.MockRouteHandler.global_failure_rate = None
+        mockroute.MockRouteHandler.enable_cors = True
+        mockroute.MockRouteHandler.enable_colors = False
+
+        cls.server = mockroute.ThreadingHTTPServer(
+            ("127.0.0.1", 0), mockroute.MockRouteHandler
+        )
+        cls.port = cls.server.server_address[1]
+        cls.server_thread = threading.Thread(
+            target=cls.server.serve_forever, daemon=True
+        )
+        cls.server_thread.start()
+        time.sleep(0.1)
+
+    @classmethod
+    def tearDownClass(cls):
+        """Shut down the test server."""
+        cls.server.shutdown()
+        cls.server_thread.join(timeout=5)
+
+    def _request(self, method, path, body=None, headers=None):
+        """Make an HTTP request and return response."""
+        conn = HTTPConnection("127.0.0.1", self.port, timeout=5)
+        data = None
+        if body is not None:
+            data = json.dumps(body).encode("utf-8")
+            headers = headers or {}
+            headers["Content-Type"] = "application/json"
+            headers["Content-Length"] = str(len(data))
+        conn.request(method, path, body=data, headers=headers or {})
+        resp = conn.getresponse()
+        resp_body = resp.read()
+        conn.close()
+        return resp, resp_body
+
+    def test_path_param_in_response(self):
+        """Path parameter is rendered in response body."""
+        resp, body = self._request("GET", "/api/users/42")
+        self.assertEqual(resp.status, 200)
+        result = json.loads(body)
+        self.assertEqual(result, {"id": "42", "name": "User 42"})
+
+    def test_query_param_in_response(self):
+        """Query parameter is rendered in response body."""
+        resp, body = self._request("GET", "/api/search?q=hello")
+        self.assertEqual(resp.status, 200)
+        result = json.loads(body)
+        self.assertEqual(result, {"query": "hello", "results": []})
+
+    def test_request_body_in_response(self):
+        """Request body is echoed back in response."""
+        request_body = {"message": "Hello World"}
+        resp, body = self._request("POST", "/api/echo", body=request_body)
+        self.assertEqual(resp.status, 200)
+        result = json.loads(body)
+        self.assertEqual(result, {"echo": request_body})
+
+    def test_no_template_static_response(self):
+        """Routes without templates still work (backward compatible)."""
+        # Add a static route
+        self.config["routes"].append(
+            {
+                "path": "/static",
+                "method": "GET",
+                "status": 200,
+                "body": {"static": "value"},
+                "latency_ms": 0,
+                "failure_rate": 0.0,
+            }
+        )
+        resp, body = self._request("GET", "/static")
+        self.assertEqual(resp.status, 200)
+        result = json.loads(body)
+        self.assertEqual(result, {"static": "value"})
+
+
 class TestSwaggerUI(unittest.TestCase):
     """Test Swagger UI server."""
 
@@ -933,7 +1130,7 @@ class TestSwaggerUI(unittest.TestCase):
         resp, body = self._request("GET", "/openapi.json")
         self.assertEqual(resp.status, 200)
         self.assertIn("application/json", resp.getheader("Content-Type"))
-        
+
         spec = json.loads(body)
         self.assertEqual(spec["openapi"], "3.0.0")
         self.assertIn("/health", spec["paths"])
@@ -941,9 +1138,9 @@ class TestSwaggerUI(unittest.TestCase):
 
     def test_openapi_spec_has_path_params(self):
         """OpenAPI spec correctly represents path parameters."""
-        resp, body = self._request("GET", "/openapi.json")
+        _resp, body = self._request("GET", "/openapi.json")
         spec = json.loads(body)
-        
+
         users_path = spec["paths"]["/api/users/{id}"]
         self.assertIn("parameters", users_path["get"])
         self.assertEqual(users_path["get"]["parameters"][0]["name"], "id")
@@ -953,14 +1150,14 @@ class TestSwaggerUI(unittest.TestCase):
         """Docs are disabled when --no-docs is used."""
         # Create a new server with docs disabled
         mockroute.MockRouteHandler.enable_docs = False
-        
+
         server = mockroute.ThreadingHTTPServer(
             ("127.0.0.1", 0), mockroute.MockRouteHandler
         )
         port = server.server_address[1]
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
-        
+
         try:
             conn = HTTPConnection("127.0.0.1", port, timeout=5)
             conn.request("GET", "/docs")
@@ -979,16 +1176,26 @@ class TestGenerateOpenAPISpec(unittest.TestCase):
     def test_basic_spec(self):
         """Basic spec generation."""
         routes = [
-            {"path": "/health", "method": "GET", "status": 200, "body": {"status": "ok"}},
-            {"path": "/api/users", "method": "POST", "status": 201, "body": {"created": True}},
+            {
+                "path": "/health",
+                "method": "GET",
+                "status": 200,
+                "body": {"status": "ok"},
+            },
+            {
+                "path": "/api/users",
+                "method": "POST",
+                "status": 201,
+                "body": {"created": True},
+            },
         ]
-        
+
         spec = mockroute.generate_openapi_spec(routes)
-        
+
         self.assertEqual(spec["openapi"], "3.0.0")
         self.assertIn("/health", spec["paths"])
         self.assertIn("/api/users", spec["paths"])
-        
+
         health_get = spec["paths"]["/health"]["get"]
         self.assertEqual(health_get["summary"], "GET /health")
         self.assertIn("200", health_get["responses"])
@@ -996,15 +1203,20 @@ class TestGenerateOpenAPISpec(unittest.TestCase):
     def test_path_params_converted(self):
         """Path params converted from :id to {id} format."""
         routes = [
-            {"path": "/api/users/:id", "method": "GET", "status": 200, "body": {"id": 1}},
+            {
+                "path": "/api/users/:id",
+                "method": "GET",
+                "status": 200,
+                "body": {"id": 1},
+            },
         ]
-        
+
         spec = mockroute.generate_openapi_spec(routes)
-        
+
         # Should use OpenAPI format {id}, not :id
         self.assertIn("/api/users/{id}", spec["paths"])
         self.assertNotIn("/api/users/:id", spec["paths"])
-        
+
         # Should have parameter definition
         params = spec["paths"]["/api/users/{id}"]["get"]["parameters"]
         self.assertEqual(len(params), 1)
@@ -1016,11 +1228,16 @@ class TestGenerateOpenAPISpec(unittest.TestCase):
         """Multiple methods on same path."""
         routes = [
             {"path": "/api/users", "method": "GET", "status": 200, "body": []},
-            {"path": "/api/users", "method": "POST", "status": 201, "body": {"created": True}},
+            {
+                "path": "/api/users",
+                "method": "POST",
+                "status": 201,
+                "body": {"created": True},
+            },
         ]
-        
+
         spec = mockroute.generate_openapi_spec(routes)
-        
+
         self.assertIn("get", spec["paths"]["/api/users"])
         self.assertIn("post", spec["paths"]["/api/users"])
 
@@ -1029,9 +1246,9 @@ class TestGenerateOpenAPISpec(unittest.TestCase):
         routes = [
             {"path": "/text", "method": "GET", "status": 200, "body": "Hello World"},
         ]
-        
+
         spec = mockroute.generate_openapi_spec(routes)
-        
+
         response = spec["paths"]["/text"]["get"]["responses"]["200"]
         self.assertIn("text/plain", response["content"])
 
@@ -1040,9 +1257,11 @@ class TestGenerateOpenAPISpec(unittest.TestCase):
         routes = [
             {"path": "/json", "method": "GET", "status": 200, "body": {"key": "value"}},
         ]
-        
+
         spec = mockroute.generate_openapi_spec(routes)
-        
+
         response = spec["paths"]["/json"]["get"]["responses"]["200"]
         self.assertIn("application/json", response["content"])
-        self.assertEqual(response["content"]["application/json"]["example"], {"key": "value"})
+        self.assertEqual(
+            response["content"]["application/json"]["example"], {"key": "value"}
+        )

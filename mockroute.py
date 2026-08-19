@@ -3,7 +3,8 @@
 mockroute - Zero-dependency local mock API server.
 
 Point it at a JSON route file, and it serves fake responses with
-configurable latency, failure injection, CORS support, and path parameters.
+configurable latency, failure injection, CORS support, path parameters,
+dynamic responses, and Swagger UI documentation.
 """
 
 from __future__ import annotations
@@ -14,11 +15,12 @@ import random
 import re
 import sys
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, ClassVar
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
@@ -44,7 +46,10 @@ SWAGGER_HTML = """<!DOCTYPE html>
         window.ui = SwaggerUIBundle({{
             url: "/openapi.json",
             dom_id: "#swagger-ui",
-            presets: [SwaggerUIBundle.presets.apis, SwaggerUIBundle.SwaggerUIStandalonePreset],
+            presets: [
+                SwaggerUIBundle.presets.apis,
+                SwaggerUIBundle.SwaggerUIStandalonePreset,
+            ],
             layout: "BaseLayout"
         }});
     </script>
@@ -103,14 +108,16 @@ def route_to_pattern(route_path: str) -> re.Pattern:
     return re.compile(f"^{pattern}$")
 
 
-def generate_openapi_spec(routes: list[dict], title: str = "Mock API", version: str = "0.3.0") -> dict:
+def generate_openapi_spec(
+    routes: list[dict], title: str = "Mock API", version: str = "0.4.0"
+) -> dict:
     """Generate OpenAPI 3.0 spec from route configuration.
-    
+
     Args:
         routes: List of route definitions
         title: API title for the spec
         version: API version for the spec
-    
+
     Returns:
         OpenAPI 3.0 specification as a dictionary
     """
@@ -119,63 +126,57 @@ def generate_openapi_spec(routes: list[dict], title: str = "Mock API", version: 
         "info": {
             "title": title,
             "version": version,
-            "description": "Generated from mockroute configuration"
+            "description": "Generated from mockroute configuration",
         },
-        "paths": {}
+        "paths": {},
     }
-    
+
     for route in routes:
         path = route.get("path", "")
         method = route.get("method", "GET").lower()
-        
+
         # Convert :param to {param} for OpenAPI format
         openapi_path = re.sub(r":([a-zA-Z_][a-zA-Z0-9_]*)", r"{\1}", path)
-        
+
         if openapi_path not in spec["paths"]:
             spec["paths"][openapi_path] = {}
-        
+
         # Build parameter list for path params
         params = []
         for match in re.finditer(r":([a-zA-Z_][a-zA-Z0-9_]*)", path):
             param_name = match.group(1)
-            params.append({
-                "name": param_name,
-                "in": "path",
-                "required": True,
-                "schema": {"type": "string"}
-            })
-        
+            params.append(
+                {
+                    "name": param_name,
+                    "in": "path",
+                    "required": True,
+                    "schema": {"type": "string"},
+                }
+            )
+
         # Build response object
         status_code = str(route.get("status", 200))
-        response_obj = {
-            "description": f"Response for {method.upper()} {path}"
-        }
-        
+        response_obj = {"description": f"Response for {method.upper()} {path}"}
+
         # Try to extract example from body
         body = route.get("body")
         if body is not None:
             content_type = "application/json"
             if isinstance(body, str):
                 content_type = "text/plain"
-            
-            response_obj["content"] = {
-                content_type: {
-                    "example": body
-                }
-            }
-        
+
+            response_obj["content"] = {content_type: {"example": body}}
+
         route_entry = {
             "summary": f"{method.upper()} {path}",
-            "responses": {
-                status_code: response_obj
-            }
+            "responses": {status_code: response_obj},
         }
-        
+
         if params:
             route_entry["parameters"] = params
-        
+
         spec["paths"][openapi_path][method] = route_entry
-    
+
     return spec
 
 
@@ -251,6 +252,97 @@ def format_body(body: Any) -> tuple[bytes, str]:
     return json.dumps(body).encode("utf-8"), "application/json"
 
 
+def render_template(template: Any, context: dict[str, Any]) -> Any:
+    """Render a template by replacing {{param}} placeholders.
+
+    Supports:
+    - Simple substitution: {{name}}
+    - Nested access: {{user.name}}
+    - Array access: {{items.0}}
+
+    When the entire string is a single placeholder, the original type is preserved.
+    """
+    if isinstance(template, str):
+        # Check if entire string is a single placeholder
+        full_match = re.fullmatch(r"\{\{([^}]+)\}\}", template)
+        if full_match:
+            key = full_match.group(1).strip()
+            value = _resolve_key(key, context)
+            if value is not None:
+                return value
+            return template
+
+        # Otherwise do string replacement
+        result = template
+        for match in re.finditer(r"\{\{([^}]+)\}\}", template):
+            placeholder = match.group(0)  # {{name}}
+            key = match.group(1).strip()  # name
+
+            value = _resolve_key(key, context)
+            if value is not None:
+                result = result.replace(placeholder, str(value))
+        return result
+    elif isinstance(template, dict):
+        return {k: render_template(v, context) for k, v in template.items()}
+    elif isinstance(template, list):
+        return [render_template(item, context) for item in template]
+    else:
+        return template
+
+
+def _resolve_key(key: str, context: dict[str, Any]) -> Any:
+    """Resolve a dotted key like 'user.name' or 'items.0' from context."""
+    parts = key.split(".")
+    current = context
+
+    for part in parts:
+        if isinstance(current, dict):
+            current = current.get(part)
+        elif isinstance(current, list):
+            try:
+                current = current[int(part)]
+            except (ValueError, IndexError):
+                return None
+        else:
+            return None
+
+        if current is None:
+            return None
+
+    return current
+
+
+def parse_query_string(path: str) -> dict[str, list[str]]:
+    """Parse query string from URL path."""
+    if "?" not in path:
+        return {}
+    query_string = path.split("?", 1)[1]
+    return urllib.parse.parse_qs(query_string)
+
+
+def parse_request_body(method: str, headers: dict, rfile) -> Any:
+    """Parse request body based on content type."""
+    if method not in ("POST", "PUT", "PATCH"):
+        return None
+
+    content_length = int(headers.get("Content-Length", 0))
+    if content_length == 0:
+        return None
+
+    content_type = headers.get("Content-Type", "")
+    body = rfile.read(content_length)
+
+    if "application/json" in content_type:
+        try:
+            return json.loads(body.decode("utf-8"))
+        except json.JSONDecodeError:
+            return body.decode("utf-8")
+    elif "application/x-www-form-urlencoded" in content_type:
+        return urllib.parse.parse_qs(body.decode("utf-8"))
+    else:
+        return body.decode("utf-8")
+
+
 class MockRouteHandler(BaseHTTPRequestHandler):
     """HTTP request handler for mock routes."""
 
@@ -297,7 +389,7 @@ class MockRouteHandler(BaseHTTPRequestHandler):
         """Core request handling logic."""
         # Strip query string for route matching
         path = self.path.split("?")[0]
-        
+
         # Handle Swagger UI requests
         if self.enable_docs:
             if path == "/docs" or path == "/docs/":
@@ -313,7 +405,7 @@ class MockRouteHandler(BaseHTTPRequestHandler):
                 elif method == "OPTIONS":
                     self._send_response(204, None)
                     return
-            
+
             if path == "/openapi.json":
                 if method == "GET":
                     routes = self._get_routes()
@@ -328,7 +420,7 @@ class MockRouteHandler(BaseHTTPRequestHandler):
                 elif method == "OPTIONS":
                     self._send_response(204, None)
                     return
-        
+
         routes = self._get_routes()
         defaults = self._get_defaults()
 
@@ -354,6 +446,19 @@ class MockRouteHandler(BaseHTTPRequestHandler):
 
         # Apply defaults
         route = apply_defaults(route, defaults)
+
+        # Parse query parameters
+        query_params = parse_query_string(self.path)
+
+        # Parse request body
+        request_body = parse_request_body(method, dict(self.headers), self.rfile)
+
+        # Build template context
+        context = {
+            "path": path_params,
+            "query": {k: v[0] if len(v) == 1 else v for k, v in query_params.items()},
+            "body": request_body,
+        }
 
         # Determine latency
         if self.global_latency is not None:
@@ -386,6 +491,11 @@ class MockRouteHandler(BaseHTTPRequestHandler):
         # Send successful response
         status = route.get("status", 200)
         body = route.get("body")
+
+        # Render template if body contains {{}} placeholders
+        if body is not None and _has_template(body):
+            body = render_template(body, context)
+
         route_headers = route.get("headers", {})
         # HEAD requests must not include a response body
         skip_body = method == "HEAD"
@@ -463,6 +573,17 @@ class MockRouteHandler(BaseHTTPRequestHandler):
 
     def do_OPTIONS(self) -> None:
         self._handle_request("OPTIONS")
+
+
+def _has_template(value: Any) -> bool:
+    """Check if a value contains {{}} template placeholders."""
+    if isinstance(value, str):
+        return bool(re.search(r"\{\{[^}]+\}\}", value))
+    elif isinstance(value, dict):
+        return any(_has_template(v) for v in value.values())
+    elif isinstance(value, list):
+        return any(_has_template(item) for item in value)
+    return False
 
 
 def main() -> None:

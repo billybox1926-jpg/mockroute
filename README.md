@@ -17,6 +17,28 @@ Point it at a JSON route file, and it serves fake responses with configurable la
 - **Colored output** — method and status codes colorized for readability
 - **Swagger UI** — interactive API docs at /docs with OpenAPI spec generation
 
+## Dynamic Responses
+
+Use `{{param}}` placeholders in response bodies to inject request data:
+
+```json
+{
+  "path": "/api/users/:id",
+  "method": "GET",
+  "body": {"id": "{{path.id}}", "name": "User {{path.id}}"}
+}
+```
+
+Placeholders:
+- `{{path.param}}` — path parameters
+- `{{query.param}}` — query parameters
+- `{{body}}` — entire request body (preserves type)
+
+```bash
+curl http://localhost:8000/api/users/42
+# {"id": "42", "name": "User 42"}
+```
+
 ## Quick Start
 
 ```bash

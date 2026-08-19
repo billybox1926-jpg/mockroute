@@ -357,6 +357,7 @@ class TestMockRouteHandler(unittest.TestCase):
         resp, body = self._request("GET", "/health")
         self.assertIn("application/json", resp.getheader("Content-Type"))
         self.assertEqual(resp.getheader("Access-Control-Allow-Origin"), "*")
+        self.assertEqual(json.loads(body), {"status": "ok"})
 
 
 class TestFailureInjection(unittest.TestCase):

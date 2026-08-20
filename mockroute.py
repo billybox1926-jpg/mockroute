@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, ClassVar
 
-__version__ = "0.7.0"
+__version__ = "0.7.1"
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
